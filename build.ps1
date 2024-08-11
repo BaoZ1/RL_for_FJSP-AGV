@@ -1,6 +1,16 @@
-conda activate rl
-
 Push-Location (Split-Path -Parent $PSCommandPath)
+
+Push-Location binds
+
+if (-Not (Test-Path pybind11\build)) {
+    Push-Location pybind11
+    mkdir build
+    Push-Location build
+    cmake ..
+    cmake --build . --config Release --target check
+    Pop-Location
+    Pop-Location
+}
 
 Get-ChildItem -Filter *.pyd | Remove-Item
 Get-ChildItem -Filter *.pyi | Remove-Item
