@@ -139,7 +139,7 @@ int comp2int(const strong_ordering &od)
 struct Task
 {
     Task(TaskId id) : id(id) {}
-    Task(TaskId id, MachineType mt) : id(id), machine_type(mt) {}
+    Task(TaskId id, MachineType mt, double pt) : id(id), machine_type(mt), process_time(pt) {}
 
     virtual string identifier() = 0;
     virtual string base_info_string() = 0;
@@ -158,7 +158,9 @@ struct Task
 
     MachineType machine_type;
     TaskStatus status;
-    // TODO 时间相关
+
+    double process_time;
+    double finish_timestamp;
 
     unordered_set<TaskId> precursors;
     unordered_set<TaskId> successors;
@@ -192,15 +194,15 @@ struct JobEnd : public Task
 
 struct SimplifiedTask : public Task
 {
-    SimplifiedTask(TaskId id, MachineType mt, TaskId rid, size_t idx) : Task(id, mt), raw_id(rid), index(idx) {}
+    SimplifiedTask(TaskId id, MachineType mt, double pt, TaskId rid, size_t idx) : Task(id, mt, pt), raw_id(rid), index(idx) {}
     string identifier() override
     {
         return string("simplified");
     }
     string base_info_string() override
     {
-        return format("id: {}, type: {}, raw_id: {}, index: {}, status: {}",
-                      this->id, this->machine_type, this->raw_id, this->index, enum_string(this->status));
+        return format("id: {}, type: {}, process_time: {:.2f}, raw_id: {}, index: {}, status: {}, finish_timestamp: {:.2f}",
+                      this->id, this->machine_type, this->process_time, this->raw_id, this->index, enum_string(this->status), this->finish_timestamp);
     }
 
     TaskId raw_id;
@@ -209,15 +211,15 @@ struct SimplifiedTask : public Task
 
 struct RawTask : public Task
 {
-    RawTask(TaskId id, MachineType mt, size_t c) : Task(id, mt), count(c), current(0) {}
+    RawTask(TaskId id, MachineType mt, double pt, size_t c) : Task(id, mt, pt), count(c), current(0) {}
     string identifier() override
     {
         return string("raw");
     }
     string base_info_string() override
     {
-        return format("id: {}, type: {}, count: {}, current: {}, status: {}",
-                      this->id, this->machine_type, this->count, this->current, enum_string(this->status));
+        return format("id: {}, type: {}, process_time: {:.2f}, count: {}, current: {}, status: {}, finish_timestamp: {:.2f}",
+                      this->id, this->machine_type, this->process_time, this->count, this->current, enum_string(this->status), this->finish_timestamp);
     }
 
     size_t count;
@@ -249,8 +251,8 @@ struct AGV
             return format("<AGV (speed: {:.2f}, status: {}, position: {}, loaded: {})>",
                           this->speed, enum_string(this->status), this->target, this->loaded);
         case AGVStatus::moving:
-            return format("<AGV (speed: {:.2f}, status: {}, target: {}, time_remained: {}, loaded: {})>",
-                          this->speed, enum_string(this->status), this->target, this->time_remained, this->loaded);
+            return format("<AGV (speed: {:.2f}, status: {}, target: {}, finish_timestamp: {}, loaded: {})>",
+                          this->speed, enum_string(this->status), this->target, this->finish_timestamp, this->loaded);
         default:
             throw exception();
         }
@@ -260,7 +262,7 @@ struct AGV
     double speed;
     AGVStatus status;
     MachineId target;
-    double time_remained;
+    double finish_timestamp;
     bool loaded;
 };
 
@@ -410,7 +412,7 @@ public:
     {
         auto new_AGV = make_shared<AGV>(this->next_AGV_id++, speed);
         new_AGV->target = init_pos;
-        new_AGV->time_remained = 0;
+        new_AGV->finish_timestamp = 0;
         new_AGV->status = AGVStatus::idle;
         new_AGV->loaded = false;
 
@@ -496,12 +498,13 @@ public:
 
     TaskId add_task(
         MachineType type,
+        double process_time,
         TaskId raw_id,
         size_t index,
         optional<unordered_set<TaskId>> precursors,
         optional<unordered_set<TaskId>> successors)
     {
-        auto node = make_shared<SimplifiedTask>(this->next_task_id++, type, raw_id, index);
+        auto node = make_shared<SimplifiedTask>(this->next_task_id++, type, process_time, raw_id, index);
         node->status = TaskStatus::blocked;
         this->tasks[node->id] = node;
         this->set_task_relation(node->id, precursors, successors);
@@ -510,17 +513,56 @@ public:
 
     bool task_time_compare(TaskId a, TaskId b)
     {
-        // TODO
+        return get<shared_ptr<SimplifiedTask>>(this->tasks[a])->finish_timestamp < get<shared_ptr<SimplifiedTask>>(this->tasks[b])->finish_timestamp;
     }
 
     bool AGV_time_compare(AGVId a, AGVId b)
     {
-        // TODO
+        return this->AGVs[a]->finish_timestamp < this->AGVs[b]->finish_timestamp;
     }
 
-    void step()
+    void wait()
     {
-        // TODO
+        if(!this->processing_tasks.empty() && !this->moving_AGVs.empty())
+        {
+            auto nearest_task = get<shared_ptr<SimplifiedTask>>(this->tasks[this->processing_tasks.top()]);
+            auto nearest_AGV = this->AGVs[this->moving_AGVs.top()];
+
+            if(nearest_task->finish_timestamp < nearest_AGV->finish_timestamp)
+            {
+                this->processing_tasks.pop();
+                return this->wait_task(nearest_task->id);
+            }
+            else
+            {
+                this->moving_AGVs.pop();
+                return this->wait_AGV(nearest_AGV->id);
+            }
+        }
+
+        if(!this->processing_tasks.empty())
+        {
+            TaskId id = this->processing_tasks.top();
+            this->processing_tasks.pop();
+            return this->wait_task(id);
+        }
+
+        if(!this->moving_AGVs.empty())
+        {
+            AGVId id = this->moving_AGVs.top();
+            this->moving_AGVs.pop();
+            return this->wait_AGV(id);
+        }
+    }
+
+    void wait_task(TaskId id)
+    {
+
+    }
+
+    void wait_AGV(AGVId id)
+    {
+
     }
 
     string identifier() override
@@ -539,9 +581,9 @@ public:
     RawJob() : Job<RawTask>() {}
     shared_ptr<SimplifiedJob> simplify();
 
-    TaskId add_task(MachineType type, size_t count, optional<unordered_set<TaskId>> precursors, optional<unordered_set<TaskId>> successors)
+    TaskId add_task(MachineType type, double process_time, size_t count, optional<unordered_set<TaskId>> precursors, optional<unordered_set<TaskId>> successors)
     {
-        auto node = make_shared<RawTask>(this->next_task_id++, type, count);
+        auto node = make_shared<RawTask>(this->next_task_id++, type, process_time, count);
         node->status = TaskStatus::blocked;
         this->tasks[node->id] = node;
         this->set_task_relation(node->id, precursors, successors);
@@ -598,6 +640,7 @@ public:
         }
 
         vector<TaskId> exist_tasks;
+        uniform_real_distribution<double> process_time_dist(min_process_time, max_process_time);
         discrete_distribution<size_t> prev_count_dist({3, 5, 3, 1});
         discrete_distribution<size_t> repeat_count_dist({5, 3, 1});
         for (size_t i = 0; i < task_count; i++)
@@ -614,7 +657,7 @@ public:
                 }
                 prevs.insert(sample);
             }
-            exist_tasks.emplace_back(ret->add_task(machine_type_dist(engine), 1 + repeat_count_dist(engine), prevs, nullopt));
+            exist_tasks.emplace_back(ret->add_task(machine_type_dist(engine), process_time_dist(engine), 1 + repeat_count_dist(engine), prevs, nullopt));
         }
 
         return ret;
@@ -659,7 +702,7 @@ shared_ptr<RawJob> SimplifiedJob::to_raw()
                     {
                         precursors.insert(id_mapper[precursor]);
                     }
-                    auto new_id = raw->add_task(task_node->machine_type, 1, precursors, nullopt);
+                    auto new_id = raw->add_task(task_node->machine_type, task_node->process_time, 1, precursors, nullopt);
                     auto new_node = get<shared_ptr<RawTask>>(raw->get_task_node(new_id));
                     new_node->current = task_node->status == TaskStatus::finished ? 1 : 0;
                     new_node->status = task_node->status;
@@ -745,7 +788,7 @@ shared_ptr<SimplifiedJob> RawJob::simplify()
                     {
                         precursors.insert(prev_id);
                     }
-                    TaskId new_id = simplified->add_task(task_node->machine_type, id, idx, precursors, nullopt);
+                    TaskId new_id = simplified->add_task(task_node->machine_type, task_node->process_time, id, idx, precursors, nullopt);
                     auto new_task = get<shared_ptr<SimplifiedTask>>(simplified->get_task_node(new_id));
                     switch (comp2int(new_task->index <=> task_node->current))
                     {
@@ -829,7 +872,7 @@ PYBIND11_MODULE(graph, m)
         .def("__repr__", &SimplifiedJob::repr);
     py::class_<RawJob, shared_ptr<RawJob>>(m, "RawJob")
         .def(py::init<>())
-        .def("add_task", &RawJob::add_task, "machine_type"_a, "repeat_count"_a = 1, "precursors"_a = nullopt, "successors"_a = nullopt)
+        .def("add_task", &RawJob::add_task, "machine_type"_a, "process_time"_a, "repeat_count"_a = 1, "precursors"_a = nullopt, "successors"_a = nullopt)
         .def("add_relation", &RawJob::add_relation, "from"_a, "to"_a)
         .def("remove_relation", &RawJob::remove_relation, "from"_a, "to"_a)
         .def("remove_task", &RawJob::remove_task, "task_id"_a)
