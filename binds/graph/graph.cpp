@@ -7,8 +7,11 @@
 #include <concepts>
 #include <random>
 #include <functional>
+#include <limits>
 
 #include <map>
+#include <tuple>
+#include <array>
 #include <unordered_set>
 #include <sstream>
 #include <string>
@@ -21,7 +24,7 @@ using namespace std;
 namespace py = pybind11;
 namespace ph = placeholders;
 
-#define OUT(...) cout << format(__VA_ARGS__) << endl;
+#define DEBUG_OUT(...) NDEBUG ? (void)0 : std::cout << format(__VA_ARGS__) << std::endl
 
 using TaskId = size_t;
 using MachineId = size_t;
@@ -31,10 +34,10 @@ using MachineType = size_t;
 enum class TaskStatus
 {
     blocked,
-    lack_of_materials,
     waiting,
     processing,
     need_transport,
+    waiting_transport,
     transporting,
     finished
 };
@@ -45,14 +48,14 @@ constexpr string enum_string(TaskStatus s)
     {
     case TaskStatus::blocked:
         return string("blocked");
-    case TaskStatus::lack_of_materials:
-        return string("lack_of_materials");
     case TaskStatus::waiting:
         return string("waiting");
     case TaskStatus::processing:
         return string("processing");
     case TaskStatus::need_transport:
         return string("need_transport");
+    case TaskStatus::waiting_transport:
+        return string("waiting_transport");
     case TaskStatus::transporting:
         return string("transporting");
     case TaskStatus::finished:
@@ -65,6 +68,7 @@ constexpr string enum_string(TaskStatus s)
 enum class MachineStatus
 {
     idle,
+    lack_of_material,
     working,
     holding_product,
 };
@@ -75,6 +79,8 @@ constexpr string enum_string(MachineStatus s)
     {
     case MachineStatus::idle:
         return string("idle");
+    case MachineStatus::lack_of_material:
+        return string("lack_of_material");
     case MachineStatus::working:
         return string("working");
     case MachineStatus::holding_product:
@@ -87,7 +93,9 @@ constexpr string enum_string(MachineStatus s)
 enum class AGVStatus
 {
     idle,
-    moving
+    moving,
+    picking,
+    transporting
 };
 
 constexpr string enum_string(AGVStatus s)
@@ -98,6 +106,10 @@ constexpr string enum_string(AGVStatus s)
         return string("idle");
     case AGVStatus::moving:
         return string("moving");
+    case AGVStatus::picking:
+        return string("picking");
+    case AGVStatus::transporting:
+        return string("transporting");
     default:
         throw pybind11::value_error();
     }
@@ -119,7 +131,7 @@ string id_set_string(const unordered_set<TaskId> &s)
     return ss.str();
 }
 
-string add_indent(const string &s, size_t indent_count=1)
+string add_indent(const string &s, size_t indent_count = 1)
 {
     stringstream oss(s), iss;
     string line;
@@ -270,11 +282,13 @@ struct Machine
 
 struct AGV
 {
-    AGV(AGVId id, double speed) : id(id),
-                                  speed(speed),
-                                  status(AGVStatus::idle),
-                                  finish_timestamp(0),
-                                  loaded_item(nullopt) {}
+    AGV(AGVId id, double speed, MachineId init_pos) : id(id),
+                                                      speed(speed),
+                                                      status(AGVStatus::idle),
+                                                      position(init_pos),
+                                                      target(0),
+                                                      finish_timestamp(0),
+                                                      loaded_item(nullopt) {}
     string repr()
     {
         switch (this->status)
@@ -290,35 +304,28 @@ struct AGV
         }
     }
 
-    void start_move(MachineId target, optional<TaskId> item, double current_timestamp, double distance)
-    {
-        this->position = target;
-        this->loaded_item = item;
-        this->status = AGVStatus::moving;
-        this->finish_timestamp = current_timestamp + distance / this->speed;
-    }
-
-    void finish()
-    {
-        this->status = AGVStatus::idle;
-        this->loaded_item = nullopt;
-    }
-
     AGVId id;
     double speed;
     AGVStatus status;
-    MachineId position;
+    MachineId position, target;
     double finish_timestamp;
     optional<TaskId> loaded_item;
 };
 
+struct JobFeatures;
+
 class Job
 {
     using TaskNodePtr = variant<shared_ptr<JobBegin>, shared_ptr<JobEnd>, shared_ptr<Task>>;
+
     using ProcessingTaskQueue = priority_queue<TaskId, vector<TaskId>, function<bool(TaskId, TaskId)>>;
     using MovingAGVQueue = priority_queue<AGVId, vector<AGVId>, function<bool(AGVId, AGVId)>>;
 
 public:
+    static const size_t task_feature_size = 5;
+    static const size_t machine_feature_size = 5;
+    static const size_t AGV_feature_size = 5;
+
     Job() : processing_tasks(ProcessingTaskQueue(bind(&Job::task_time_compare, this, ph::_1, ph::_2))),
             moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2)))
     {
@@ -424,9 +431,7 @@ public:
 
     AGVId add_AGV(double speed, MachineId init_pos)
     {
-        auto new_AGV = make_shared<AGV>(this->next_AGV_id++, speed);
-        new_AGV->position = init_pos;
-
+        auto new_AGV = make_shared<AGV>(this->next_AGV_id++, speed, init_pos);
         this->AGVs[new_AGV->id] = new_AGV;
 
         return new_AGV->id;
@@ -462,7 +467,7 @@ public:
         }
         ss << format("\n distance: \n");
         ss << add_indent("     ");
-        for(auto&& [id, _] : this->machines)
+        for (auto &&[id, _] : this->machines)
         {
             ss << format("{:^5}", id);
         }
@@ -557,6 +562,8 @@ public:
         return ret;
     }
 
+    shared_ptr<JobFeatures> features();
+
     bool task_time_compare(TaskId a, TaskId b)
     {
         return get<shared_ptr<Task>>(this->tasks[a])->finish_timestamp < get<shared_ptr<Task>>(this->tasks[b])->finish_timestamp;
@@ -567,97 +574,188 @@ public:
         return this->AGVs[a]->finish_timestamp < this->AGVs[b]->finish_timestamp;
     }
 
-    void schedule_AGV(AGVId id, MachineId target, bool with_item)
+    void act_move(AGVId id, MachineId target)
     {
         auto AGV = this->AGVs[id];
         assert(AGV->status == AGVStatus::idle);
+        AGV->target = target;
+        AGV->status = AGVStatus::moving;
+        AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+    }
 
-        if (!with_item)
+    void act_pick(AGVId id, MachineId target)
+    {
+        auto AGV = this->AGVs[id];
+        assert(AGV->status == AGVStatus::idle && !AGV->loaded_item.has_value());
+
+        if (target != this->dummy_machine_id)
         {
-            AGV->start_move(target, nullopt, this->timestamp, this->distances[AGV->position][target]);
+            auto target_machine = this->machines[target];
+            assert(target_machine->status == MachineStatus::holding_product);
+            assert(target_machine->working_task.has_value());
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
+            assert(transport_task->status == TaskStatus::need_transport);
+
+            AGV->target = target;
+            AGV->loaded_item = transport_task->id;
+            AGV->status = AGVStatus::picking;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+
+            transport_task->status = TaskStatus::waiting_transport;
         }
         else
         {
-            auto current_machine = this->machines[AGV->position];
-            assert(current_machine->status != MachineStatus::holding_product);
-            assert(current_machine->working_task.has_value());
-            auto transport_task = get<shared_ptr<Task>>(this->tasks[current_machine->working_task.value()]);
-            assert(transport_task->status == TaskStatus::need_transport);
-            transport_task->status = TaskStatus::transporting;
-            current_machine->status = MachineStatus::idle;
-            current_machine->working_task = nullopt;
-            AGV->start_move(target, transport_task->id, this->timestamp, this->distances[AGV->position][target]);
+            AGV->target = target;
+            AGV->loaded_item = this->job_begin_node_id;
+            AGV->status = AGVStatus::picking;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
         }
     }
 
-    void wait()
+    void act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
     {
-        if (!this->processing_tasks.empty() && !this->moving_AGVs.empty())
+        auto AGV = this->AGVs[id];
+        assert(AGV->status == AGVStatus::idle && AGV->loaded_item.has_value());
+
+        bool from_begin = holds_alternative<shared_ptr<JobBegin>>(this->tasks[AGV->loaded_item.value()]);
+
+        if (_target_machine != this->dummy_machine_id)
         {
-            auto nearest_task = get<shared_ptr<Task>>(this->tasks[this->processing_tasks.top()]);
-            auto nearest_AGV = this->AGVs[this->moving_AGVs.top()];
+            auto target_machine = this->machines[_target_machine];
+            assert(target_machine->status == MachineStatus::idle);
 
-            if (nearest_task->finish_timestamp < nearest_AGV->finish_timestamp)
-            {
-                this->processing_tasks.pop();
-                return this->wait_task(nearest_task->id);
-            }
-            else
-            {
-                this->moving_AGVs.pop();
-                return this->wait_AGV(nearest_AGV->id);
-            }
+            auto target_task = get<shared_ptr<Task>>(this->tasks[_target_task]);
+            assert(target_task->status == TaskStatus::blocked);
+            assert(target_task->precursor == AGV->loaded_item.value());
+            assert(target_task->machine_type == target_machine->type);
+
+            AGV->target = _target_machine;
+            AGV->status = AGVStatus::transporting;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
+
+            target_task->status = TaskStatus::waiting;
+
+            target_machine->status = MachineStatus::lack_of_material;
+            target_machine->working_task = target_task->id;
         }
+        else
+        {
+            AGV->target = _target_machine;
+            AGV->status = AGVStatus::transporting;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
+        }
+    }
 
+    void wait(double delta_time)
+    {
+        double nearest_task_finish_time = DBL_MAX;
+        double nearest_AGV_finish_time = DBL_MAX;
         if (!this->processing_tasks.empty())
         {
-            TaskId id = this->processing_tasks.top();
-            this->processing_tasks.pop();
-            return this->wait_task(id);
+            nearest_task_finish_time = get<shared_ptr<Task>>(this->tasks[this->processing_tasks.top()])->finish_timestamp;
         }
 
         if (!this->moving_AGVs.empty())
         {
-            AGVId id = this->moving_AGVs.top();
-            this->moving_AGVs.pop();
-            return this->wait_AGV(id);
+            nearest_AGV_finish_time = this->AGVs[this->moving_AGVs.top()]->finish_timestamp;
+        }
+
+        if (nearest_task_finish_time <= this->timestamp + delta_time)
+        {
+            return wait_task();
+        }
+        else if (nearest_AGV_finish_time <= this->timestamp + delta_time)
+        {
+            return wait_AGV();
+        }
+        else
+        {
+            this->timestamp += delta_time;
         }
     }
 
-    void wait_task(TaskId id)
+    void wait_task()
     {
-        auto task = get<shared_ptr<Task>>(this->tasks[id]);
-        this->timestamp = task->finish_timestamp;
+        auto task = get<shared_ptr<Task>>(this->tasks[this->processing_tasks.top()]);
+        this->processing_tasks.pop();
         assert(task->status == TaskStatus::processing);
+        this->timestamp = task->finish_timestamp;
         task->status = TaskStatus::need_transport;
         auto machine = this->machines[task->processing_machine.value()];
         assert(machine->status == MachineStatus::working);
         machine->status = MachineStatus::holding_product;
     }
 
-    void wait_AGV(AGVId id)
+    void wait_AGV()
     {
-        auto AGV = this->AGVs[id];
+        auto AGV = this->AGVs[this->moving_AGVs.top()];
+        this->moving_AGVs.pop();
+
         this->timestamp = AGV->finish_timestamp;
-        if (AGV->loaded_item.has_value())
+
+        switch (AGV->status)
         {
-            auto task = get<shared_ptr<Task>>(this->tasks[AGV->loaded_item.value()]);
-            assert(task->status == TaskStatus::transporting);
-            task->status = TaskStatus::finished;
-            if (holds_alternative<shared_ptr<Task>>(this->tasks[task->successor]))
-            {
-                auto &&succ_task = get<shared_ptr<Task>>(this->tasks[task->successor]);
-                assert(succ_task->status == TaskStatus::lack_of_materials);
-                succ_task->status = TaskStatus::waiting;
-            }
+        case AGVStatus::moving:
+        {
+            AGV->position = AGV->target;
+            break;
+        }
+        case AGVStatus::picking:
+        {
+            auto target_machine = this->machines[AGV->target];
+            assert(target_machine->status == MachineStatus::holding_product);
+            assert(target_machine->working_task.has_value());
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
+            assert(transport_task->status == TaskStatus::need_transport);
+
+            AGV->status = AGVStatus::idle;
+            AGV->position = AGV->target;
+            AGV->loaded_item = transport_task->id;
+
+            target_machine->status = MachineStatus::idle;
+            target_machine->working_task = nullopt;
+
+            transport_task->status = TaskStatus::transporting;
+
+            break;
         }
 
-        AGV->finish();
+        case AGVStatus::transporting:
+        {
+            auto target_machine = this->machines[AGV->target];
+            assert(target_machine->status == MachineStatus::lack_of_material);
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[AGV->loaded_item.value()]);
+            assert(transport_task->status == TaskStatus::transporting);
+
+            auto target_task = get<shared_ptr<Task>>(this->tasks[transport_task->successor]);
+            assert(target_task->status == TaskStatus::waiting);
+            assert(target_task->machine_type == target_machine->type);
+
+            AGV->status = AGVStatus::idle;
+            AGV->loaded_item = nullopt;
+
+            target_machine->status = MachineStatus::working;
+
+            transport_task->status = TaskStatus::finished;
+
+            target_task->status = TaskStatus::processing;
+            target_task->finish_timestamp = this->timestamp + target_task->process_time;
+
+            break;
+        }
+
+        default:
+            throw logic_error(format("wrong AGV status: {}", enum_string(AGV->status)));
+        }
     }
 
 protected:
     const TaskId job_begin_node_id = 0, job_end_node_id = 1;
     TaskId next_task_id;
+    const MachineId dummy_machine_id = 0;
     MachineId next_machine_id;
     AGVId next_AGV_id;
     double timestamp;
@@ -670,19 +768,48 @@ protected:
     MovingAGVQueue moving_AGVs;
 };
 
+template <size_t N, typename T, typename ...Ts>
+struct TupleGenerator
+{
+    using type = TupleGenerator<N-1, T, T, Ts...>::type;
+};
+template <typename T, typename... Ts>
+struct TupleGenerator<0, T, Ts...>
+{
+    using type = tuple<Ts...>;
+};
+template <typename T, size_t N>
+using RepeatedTuple = TupleGenerator<N, T>::type;
+
+struct JobFeatures
+{
+    vector<RepeatedTuple<double, Job::task_feature_size>> task_features;
+    map<size_t, tuple<optional<size_t>, optional<size_t>>> task_relations;
+    vector<RepeatedTuple<double, Job::machine_feature_size>> machine_features;
+    vector<RepeatedTuple<double, Job::AGV_feature_size>> AGV_features;
+};
+
+shared_ptr<JobFeatures> Job::features()
+{
+    auto ret = make_shared<JobFeatures>();
+
+    return ret;
+}
+
 using namespace py::literals;
 
 PYBIND11_MODULE(graph, m)
 {
     py::enum_<TaskStatus>(m, "TaskStatus")
         .value("blocked", TaskStatus::blocked)
-        .value("lack_of_materials", TaskStatus::lack_of_materials)
         .value("waiting", TaskStatus::waiting)
         .value("need_transport", TaskStatus::need_transport)
+        .value("waiting_transport", TaskStatus::waiting_transport)
         .value("transporting", TaskStatus::transporting)
         .value("finished", TaskStatus::finished);
     py::enum_<MachineStatus>(m, "MachineStatus")
         .value("idle", MachineStatus::idle)
+        .value("lack_of_material", MachineStatus::lack_of_material)
         .value("working", MachineStatus::working)
         .value("holding_product", MachineStatus::holding_product);
 
@@ -710,5 +837,19 @@ PYBIND11_MODULE(graph, m)
         .def("set_distance", py::overload_cast<MachineId, MachineId, double>(&Job::set_distance))
         .def("set_distance", py::overload_cast<map<MachineId, map<MachineId, double>> &>(&Job::set_distance))
         .def_static("rand_generate", &Job::rand_generate, "task_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
-        .def("__repr__", &Job::repr);
+        .def("features", &Job::features)
+        .def("act_move", &Job::act_move, "AGV_id"_a, "target_machine"_a)
+        .def("act_pick", &Job::act_pick, "AGV_id"_a, "target_machine"_a)
+        .def("act_transport", &Job::act_transport, "AGV_id"_a, "target_task"_a, "target_machine"_a)
+        .def("wait", &Job::wait, "delta_time"_a)
+        .def("__repr__", &Job::repr)
+        .def_readonly_static("task_feature_size", &Job::task_feature_size)
+        .def_readonly_static("machine_feature_size", &Job::machine_feature_size)
+        .def_readonly_static("AGV_feature_size", &Job::AGV_feature_size);
+
+    py::class_<JobFeatures, shared_ptr<JobFeatures>>(m, "JobFeatures")
+        .def_readonly("task_features", &JobFeatures::task_features)
+        .def_readonly("task_relations", &JobFeatures::task_relations)
+        .def_readonly("machine_features", &JobFeatures::machine_features)
+        .def_readonly("AGV_features", &JobFeatures::AGV_features);
 }
