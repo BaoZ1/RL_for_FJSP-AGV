@@ -7,8 +7,12 @@
 #include <concepts>
 #include <random>
 #include <functional>
+#include <limits>
+#include <execution>
 
 #include <map>
+#include <tuple>
+#include <array>
 #include <unordered_set>
 #include <sstream>
 #include <string>
@@ -21,17 +25,25 @@ using namespace std;
 namespace py = pybind11;
 namespace ph = placeholders;
 
-#define OUT(...) cout << format(__VA_ARGS__) << endl;
+#ifdef NDEBUG
+#define DEBUG_OUT(...) (void)0
+#else
+#define DEBUG_OUT(...) std::cout << format(__VA_ARGS__) << std::endl
+#endif
 
-typedef size_t TaskId;
-typedef size_t MachineId;
-typedef size_t AGVId;
-typedef size_t MachineType;
+using TaskId = size_t;
+using MachineId = size_t;
+using AGVId = size_t;
+using MachineType = size_t;
 
 enum class TaskStatus
 {
     blocked,
     waiting,
+    processing,
+    need_transport,
+    waiting_transport,
+    transporting,
     finished
 };
 
@@ -43,6 +55,14 @@ constexpr string enum_string(TaskStatus s)
         return string("blocked");
     case TaskStatus::waiting:
         return string("waiting");
+    case TaskStatus::processing:
+        return string("processing");
+    case TaskStatus::need_transport:
+        return string("need_transport");
+    case TaskStatus::waiting_transport:
+        return string("waiting_transport");
+    case TaskStatus::transporting:
+        return string("transporting");
     case TaskStatus::finished:
         return string("finished");
     default:
@@ -53,7 +73,9 @@ constexpr string enum_string(TaskStatus s)
 enum class MachineStatus
 {
     idle,
-    working
+    lack_of_material,
+    working,
+    holding_product,
 };
 
 constexpr string enum_string(MachineStatus s)
@@ -62,8 +84,12 @@ constexpr string enum_string(MachineStatus s)
     {
     case MachineStatus::idle:
         return string("idle");
+    case MachineStatus::lack_of_material:
+        return string("lack_of_material");
     case MachineStatus::working:
         return string("working");
+    case MachineStatus::holding_product:
+        return string("holding_product");
     default:
         throw pybind11::value_error();
     }
@@ -72,7 +98,9 @@ constexpr string enum_string(MachineStatus s)
 enum class AGVStatus
 {
     idle,
-    moving
+    moving,
+    picking,
+    transporting
 };
 
 constexpr string enum_string(AGVStatus s)
@@ -83,6 +111,10 @@ constexpr string enum_string(AGVStatus s)
         return string("idle");
     case AGVStatus::moving:
         return string("moving");
+    case AGVStatus::picking:
+        return string("picking");
+    case AGVStatus::transporting:
+        return string("transporting");
     default:
         throw pybind11::value_error();
     }
@@ -104,7 +136,7 @@ string id_set_string(const unordered_set<TaskId> &s)
     return ss.str();
 }
 
-string add_indent(const string &s, size_t indent_count)
+string add_indent(const string &s, size_t indent_count = 1)
 {
     stringstream oss(s), iss;
     string line;
@@ -136,102 +168,106 @@ int comp2int(const strong_ordering &od)
     return 0;
 }
 
-struct Task
+template <typename T>
+string o2s(optional<T> o, string on_empty = "null")
 {
-    Task(TaskId id) : id(id) {}
-    Task(TaskId id, MachineType mt, double pt) : id(id), machine_type(mt), process_time(pt) {}
-
-    virtual string identifier() = 0;
-    virtual string base_info_string() = 0;
-
-    string repr()
+    if (o.has_value())
     {
-        stringstream ss;
-        ss << format("<{} ({})\n", this->identifier(), this->base_info_string());
-        ss << add_indent(format("p: {}\n", id_set_string(this->precursors)), 1);
-        ss << add_indent(format("s: {}", id_set_string(this->successors)), 1);
-        ss << '>';
-        return ss.str();
+        return to_string(o.value());
     }
+    return on_empty;
+}
+
+struct TaskBase
+{
+    TaskBase(TaskId id, MachineType mt) : id(id), machine_type(mt) {}
+
+    virtual string repr() = 0;
 
     TaskId id;
 
     MachineType machine_type;
+};
+
+template <typename... Types>
+    requires(derived_from<Types, TaskBase> && ...)
+shared_ptr<TaskBase> to_task_base_ptr(variant<shared_ptr<Types>...> wrapped)
+{
+    return visit([](auto &&a)
+                 { return static_pointer_cast<TaskBase>(a); }, wrapped);
+}
+
+struct JobBegin : public TaskBase
+{
+    JobBegin(TaskId id, MachineType mt) : TaskBase(id, mt) {}
+
+    string repr() override
+    {
+        stringstream ss;
+        ss << format("<begin (id: {})\n", this->id);
+        ss << add_indent(format("s: {}", id_set_string(this->successors)));
+        ss << "\n>";
+        return ss.str();
+    }
+
+    unordered_set<TaskId> successors;
+};
+
+struct JobEnd : public TaskBase
+{
+    JobEnd(TaskId id, MachineType mt) : TaskBase(id, mt) {}
+
+    string repr() override
+    {
+        stringstream ss;
+        ss << format("<end (id: {})\n", this->id);
+        ss << add_indent(format("p: {}", id_set_string(this->predecessors)));
+        ss << "\n>";
+        return ss.str();
+    }
+
+    unordered_set<TaskId> predecessors;
+};
+
+struct Task : public TaskBase
+{
+    Task(TaskId id, MachineType mt, double pt) : TaskBase(id, mt),
+                                                 status(TaskStatus::blocked),
+                                                 process_time(pt),
+                                                 finish_timestamp(0),
+                                                 processing_machine(nullopt) {}
+
+    string repr() override
+    {
+        stringstream ss;
+        ss << format("<task (id: {}, type: {}, process_time: {:.2f}, status: {})\n",
+                     this->id, this->machine_type, this->process_time, enum_string(this->status));
+        ss << add_indent(format("p: {}", this->predecessor));
+        ss << add_indent(format("s: {}", this->successor));
+        ss << "\n>";
+        return ss.str();
+    }
+
     TaskStatus status;
 
     double process_time;
     double finish_timestamp;
 
-    unordered_set<TaskId> precursors;
-    unordered_set<TaskId> successors;
-};
+    TaskId predecessor;
+    TaskId successor;
 
-struct JobBegin : public Task
-{
-    JobBegin(TaskId id) : Task(id) {}
-    string identifier() override
-    {
-        return string("begin");
-    }
-    string base_info_string() override
-    {
-        return format("id: {} status: {}", this->id, enum_string(this->status));
-    }
-};
-
-struct JobEnd : public Task
-{
-    JobEnd(TaskId id) : Task(id) {}
-    string identifier() override
-    {
-        return string("end");
-    }
-    string base_info_string() override
-    {
-        return format("id: {} status: {}", this->id, enum_string(this->status));
-    }
-};
-
-struct SimplifiedTask : public Task
-{
-    SimplifiedTask(TaskId id, MachineType mt, double pt, TaskId rid, size_t idx) : Task(id, mt, pt), raw_id(rid), index(idx) {}
-    string identifier() override
-    {
-        return string("simplified");
-    }
-    string base_info_string() override
-    {
-        return format("id: {}, type: {}, process_time: {:.2f}, raw_id: {}, index: {}, status: {}, finish_timestamp: {:.2f}",
-                      this->id, this->machine_type, this->process_time, this->raw_id, this->index, enum_string(this->status), this->finish_timestamp);
-    }
-
-    TaskId raw_id;
-    size_t index;
-};
-
-struct RawTask : public Task
-{
-    RawTask(TaskId id, MachineType mt, double pt, size_t c) : Task(id, mt, pt), count(c), current(0) {}
-    string identifier() override
-    {
-        return string("raw");
-    }
-    string base_info_string() override
-    {
-        return format("id: {}, type: {}, process_time: {:.2f}, count: {}, current: {}, status: {}, finish_timestamp: {:.2f}",
-                      this->id, this->machine_type, this->process_time, this->count, this->current, enum_string(this->status), this->finish_timestamp);
-    }
-
-    size_t count;
-    size_t current;
+    optional<MachineId> processing_machine;
 };
 
 struct Machine
 {
-    Machine(MachineId id, MachineType tp) : id(id), type(tp) {}
+    Machine(MachineId id, MachineType tp) : id(id),
+                                            type(tp),
+                                            status(MachineStatus::idle),
+                                            working_task(nullopt) {}
     string repr()
     {
-        return format("<machine (type: {}, status: {})>", this->type, enum_string(this->status));
+        return format("<machine (id: {}, type: {}, status: {})>", this->id, this->type, enum_string(this->status));
     }
 
     MachineId id;
@@ -242,145 +278,230 @@ struct Machine
 
 struct AGV
 {
-    AGV(AGVId id, double speed) : id(id), speed(speed) {}
+    AGV(AGVId id, double speed, MachineId init_pos) : id(id),
+                                                      speed(speed),
+                                                      status(AGVStatus::idle),
+                                                      position(init_pos),
+                                                      target(0),
+                                                      finish_timestamp(0),
+                                                      loaded_item(nullopt) {}
     string repr()
     {
+        string item_str = this->loaded_item.has_value() ? to_string(this->loaded_item.value()) : "none";
+
         switch (this->status)
         {
         case AGVStatus::idle:
-            return format("<AGV (speed: {:.2f}, status: {}, position: {}, loaded: {})>",
-                          this->speed, enum_string(this->status), this->target, this->loaded);
-        case AGVStatus::moving:
-            return format("<AGV (speed: {:.2f}, status: {}, target: {}, finish_timestamp: {}, loaded: {})>",
-                          this->speed, enum_string(this->status), this->target, this->finish_timestamp, this->loaded);
+            return format("<AGV (speed: {:.2f}, status: {}, position: {}, loaded_item: {})>",
+                          this->speed, enum_string(this->status), this->position, item_str);
         default:
-            throw exception();
+            return format("<AGV (speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>",
+                          this->speed, enum_string(this->status), this->position, this->target, this->finish_timestamp, item_str);
         }
     }
 
     AGVId id;
     double speed;
     AGVStatus status;
-    MachineId target;
+    MachineId position, target;
     double finish_timestamp;
-    bool loaded;
+    optional<TaskId> loaded_item;
 };
 
-template <typename T>
-    requires derived_from<T, Task>
+template <size_t N, typename T, typename... Ts>
+struct TupleGenerator
+{
+    using type = TupleGenerator<N - 1, T, T, Ts...>::type;
+};
+template <typename T, typename... Ts>
+struct TupleGenerator<0, T, Ts...>
+{
+    using type = tuple<Ts...>;
+};
+template <typename T, size_t N>
+using RepeatedTuple = TupleGenerator<N, T>::type;
+
+template <typename T, class Comp>
+class copyable_priority_queue
+{
+public:
+    copyable_priority_queue(Comp comp) : comp(comp) {}
+
+    void push(T value)
+    {
+        data.push_back(value);
+        push_heap(data.begin(), data.end(), comp);
+    }
+
+    void pop()
+    {
+        if (!data.empty())
+        {
+            pop_heap(data.begin(), data.end(), comp);
+            data.pop_back();
+        }
+    }
+
+    T top()
+    {
+        if (!data.empty())
+        {
+            return data.front();
+        }
+        throw runtime_error("Empty priority queue");
+    }
+
+    bool empty()
+    {
+        return this->data.empty();
+    }
+
+    void set_data(const vector<T> &other_data)
+    {
+        this->data = other_data;
+        push_heap(data.begin(), data.end(), comp);
+    }
+
+    const vector<T> &get_data() const
+    {
+        return this->data;
+    }
+
+private:
+    vector<T> data;
+    Comp comp;
+};
+
+struct JobFeatures;
+
 class Job
 {
-    typedef variant<shared_ptr<JobBegin>, shared_ptr<JobEnd>, shared_ptr<T>> TaskNodePtr;
+    using TaskNodePtr = variant<shared_ptr<JobBegin>, shared_ptr<JobEnd>, shared_ptr<Task>>;
+
+    using ProcessingTaskQueue = copyable_priority_queue<TaskId, function<bool(TaskId, TaskId)>>;
+    using MovingAGVQueue = copyable_priority_queue<AGVId, function<bool(AGVId, AGVId)>>;
 
 public:
-    Job()
+    static const TaskId begin_task_id = 0, end_task_id = 9999;
+    static const MachineId dummy_machine_id = 0;
+    static const MachineType dummy_machine_type = 0;
+
+    static const size_t task_feature_size = 9;
+    static const size_t machine_feature_size = 5;
+    static const size_t AGV_feature_size = 5;
+
+    Job() : timestamp(0),
+            processing_tasks(ProcessingTaskQueue(bind(&Job::task_time_compare, this, ph::_1, ph::_2))),
+            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2)))
     {
-        auto job_begin_node = make_shared<JobBegin>(this->job_begin_node_id);
-        job_begin_node->status = TaskStatus::waiting;
-        this->tasks[this->job_begin_node_id] = job_begin_node;
+        this->tasks[this->begin_task_id] = make_shared<JobBegin>(this->begin_task_id, this->dummy_machine_type);
+        this->tasks[this->end_task_id] = make_shared<JobEnd>(this->end_task_id, this->dummy_machine_type);
 
-        auto job_end_node = make_shared<JobEnd>(this->job_end_node_id);
-        job_end_node->status = TaskStatus::blocked;
-        this->tasks[this->job_end_node_id] = job_end_node;
+        this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type);
 
-        this->add_relation(this->job_begin_node_id, this->job_end_node_id);
-
-        this->next_task_id = 2;
-        this->next_machine_id = 0;
+        this->next_task_id = 1;
+        this->next_machine_id = 1;
         this->next_AGV_id = 0;
-    };
-
-    void add_relation(TaskId from, TaskId to)
-    {
-        auto process = [from, to, this](auto &&from_v, auto &&to_v)
-        {
-            auto from_ptr = static_pointer_cast<Task>(from_v);
-            auto to_ptr = static_pointer_cast<Task>(to_v);
-
-            this->remove_relation(from, this->job_end_node_id);
-            this->remove_relation(this->job_begin_node_id, to);
-
-            from_ptr->successors.emplace(to);
-            to_ptr->precursors.emplace(from);
-        };
-
-        visit(process, this->tasks[from], this->tasks[to]);
     }
 
-    void remove_relation(TaskId from, TaskId to)
+    Job(const Job &other) : processing_tasks(ProcessingTaskQueue(bind(&Job::task_time_compare, this, ph::_1, ph::_2))),
+                            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2)))
     {
-        auto process = [from, to, this](auto &&from_v, auto &&to_v)
+        for (auto [id, ptr] : other.tasks)
         {
-            auto from_ptr = static_pointer_cast<Task>(from_v);
-            auto to_ptr = static_pointer_cast<Task>(to_v);
+            visit([id, this]<typename T>(shared_ptr<T> p)
+                  { this->tasks[id] = make_shared<T>(*p); }, ptr);
+        }
+        this->next_task_id = other.next_task_id;
 
-            from_ptr->successors.erase(to);
-            if (from_ptr->successors.empty() && to != this->job_end_node_id)
-            {
-                this->add_relation(from, this->job_end_node_id);
-            }
+        for (auto [id, ptr] : other.machines)
+        {
+            this->machines[id] = make_shared<Machine>(*ptr);
+        }
+        this->next_machine_id = other.next_machine_id;
 
-            to_ptr->precursors.erase(from);
-            if (to_ptr->precursors.empty() && from != this->job_begin_node_id)
-            {
-                this->add_relation(this->job_begin_node_id, to);
-            }
-        };
+        for (auto [id, ptr] : other.AGVs)
+        {
+            this->AGVs[id] = make_shared<AGV>(*ptr);
+        }
+        this->next_AGV_id = other.next_AGV_id;
 
-        visit(process, this->tasks[from], this->tasks[to]);
+        this->distances = other.distances;
+
+        this->timestamp = other.timestamp;
+
+        this->processing_tasks.set_data(other.processing_tasks.get_data());
+        this->moving_AGVs.set_data(other.moving_AGVs.get_data());
     }
 
-    void set_task_relation(TaskId node_id, optional<unordered_set<TaskId>> precursors, optional<unordered_set<TaskId>> successors)
+    TaskId add_task(
+        MachineType type,
+        double process_time,
+        optional<TaskId> predecessor,
+        optional<TaskId> successor)
     {
-
-        unordered_set<TaskId> real_precursors;
-        if (!precursors.has_value() || precursors.value().empty())
+        assert(!(predecessor.has_value() && successor.has_value()));
+        auto node = make_shared<Task>(this->next_task_id++, type, process_time);
+        this->tasks[node->id] = node;
+        if (predecessor.has_value())
         {
-            real_precursors = unordered_set{this->job_begin_node_id};
+            node->predecessor = predecessor.value();
+            auto p_node = get<shared_ptr<Task>>(this->tasks[predecessor.value()]);
+            node->successor = p_node->successor;
+            p_node->successor = node->id;
+            if (node->successor == this->end_task_id)
+            {
+                auto &&job_end_node = get<shared_ptr<JobEnd>>(this->tasks[this->end_task_id]);
+                job_end_node->predecessors.erase(p_node->id);
+                job_end_node->predecessors.emplace(node->id);
+            }
+        }
+        else if (successor.has_value())
+        {
+            node->successor = successor.value();
+            auto s_node = get<shared_ptr<Task>>(this->tasks[successor.value()]);
+            node->predecessor = s_node->predecessor;
+            s_node->predecessor = node->id;
+            if (node->predecessor == this->begin_task_id)
+            {
+                auto &&job_begin_node = get<shared_ptr<JobBegin>>(this->tasks[this->begin_task_id]);
+                job_begin_node->successors.erase(s_node->id);
+                job_begin_node->successors.emplace(node->id);
+            }
         }
         else
         {
-            real_precursors = precursors.value();
-        }
-        for (TaskId pid : real_precursors)
-        {
-            this->add_relation(pid, node_id);
+            node->predecessor = this->begin_task_id;
+            node->successor = this->end_task_id;
+            get<shared_ptr<JobBegin>>(this->tasks[this->begin_task_id])->successors.emplace(node->id);
+            get<shared_ptr<JobEnd>>(this->tasks[this->end_task_id])->predecessors.emplace(node->id);
         }
 
-        unordered_set<TaskId> real_successors;
-        if (!successors.has_value() || successors.value().empty())
-        {
-            real_successors = unordered_set{this->job_end_node_id};
-        }
-        else
-        {
-            real_successors = successors.value();
-        }
-        for (TaskId sid : real_successors)
-        {
-            this->add_relation(node_id, sid);
-        }
+        return node->id;
     }
 
     void remove_task(TaskId id)
     {
-        if (id == this->job_begin_node_id || id == this->job_end_node_id)
+        assert(id != this->begin_task_id && id != this->end_task_id);
+
+        auto node_ptr = get<shared_ptr<Task>>(this->tasks[id]);
+        if (holds_alternative<shared_ptr<JobBegin>>(this->tasks[node_ptr->predecessor]))
         {
-            throw py::value_error();
+            get<shared_ptr<JobBegin>>(this->tasks[node_ptr->predecessor])->successors.erase(id);
+        }
+        else
+        {
+            get<shared_ptr<Task>>(this->tasks[node_ptr->predecessor])->successor = node_ptr->successor;
         }
 
-        auto node_ptr = get<shared_ptr<T>>(this->tasks[id]);
-        for (TaskId pid : node_ptr->precursors)
+        if (holds_alternative<shared_ptr<JobEnd>>(this->tasks[node_ptr->successor]))
         {
-            this->remove_relation(pid, id);
+            get<shared_ptr<JobEnd>>(this->tasks[node_ptr->successor])->predecessors.erase(id);
         }
-        for (TaskId sid : node_ptr->successors)
+        else
         {
-            this->remove_relation(id, sid);
+            get<shared_ptr<Task>>(this->tasks[node_ptr->successor])->predecessor = node_ptr->predecessor;
         }
-        get<shared_ptr<JobBegin>>(this->tasks[this->job_begin_node_id])->successors.erase(id);
-        get<shared_ptr<JobBegin>>(this->tasks[this->job_begin_node_id])->successors.erase(id);
-        this->tasks.erase(id);
     }
 
     bool contains(TaskId id)
@@ -388,7 +509,7 @@ public:
         return this->tasks.contains(id);
     }
 
-    TaskNodePtr get_task_node(TaskId id)
+    TaskNodePtr get_task(TaskId id)
     {
         return this->tasks[id];
     }
@@ -396,29 +517,26 @@ public:
     MachineId add_machine(MachineType type)
     {
         auto node = make_shared<Machine>(this->next_machine_id++, type);
-        node->status = MachineStatus::idle;
-
         this->machines[node->id] = node;
-
         return node->id;
     }
 
-    shared_ptr<Machine> get_machine_node(MachineId id)
+    shared_ptr<Machine> get_machine(MachineId id)
     {
         return this->machines[id];
     }
 
     AGVId add_AGV(double speed, MachineId init_pos)
     {
-        auto new_AGV = make_shared<AGV>(this->next_AGV_id++, speed);
-        new_AGV->target = init_pos;
-        new_AGV->finish_timestamp = 0;
-        new_AGV->status = AGVStatus::idle;
-        new_AGV->loaded = false;
-
+        auto new_AGV = make_shared<AGV>(this->next_AGV_id++, speed, init_pos);
         this->AGVs[new_AGV->id] = new_AGV;
 
         return new_AGV->id;
+    }
+
+    shared_ptr<AGV> get_AGV(AGVId id)
+    {
+        return this->AGVs[id];
     }
 
     double get_timestamp()
@@ -431,28 +549,40 @@ public:
         this->timestamp = value;
     }
 
-    virtual string identifier() = 0;
-
     string repr()
     {
         stringstream ss;
-        ss << format("<{}\n task: {}\n", this->identifier(), this->tasks.size());
+        ss << format("<job (timestamp: {:.2f})", this->timestamp);
+        ss << format("\n task: {}\n", this->tasks.size());
         for (auto &&[id, task] : this->tasks)
         {
-            visit([&ss](auto &&node_ptr)
-                  { ss << add_indent(static_pointer_cast<Task>(node_ptr)->repr(), 1) << '\n'; }, task);
+            ss << add_indent(to_task_base_ptr(task)->repr()) << '\n';
         }
         ss << format("\n machine: {}\n", this->machines.size());
         for (auto &&[_, machine] : this->machines)
         {
-            ss << add_indent(machine->repr(), 1) << '\n';
+            ss << add_indent(machine->repr()) << '\n';
         }
         ss << format("\n AGV: {}\n", this->AGVs.size());
         for (auto &&[_, agv] : this->AGVs)
         {
-            ss << add_indent(agv->repr(), 1) << '\n';
+            ss << add_indent(agv->repr()) << '\n';
         }
-        ss << '>';
+        ss << format("\n distance: \n");
+        ss << add_indent("     ");
+        for (auto &&[id, _] : this->machines)
+        {
+            ss << format("{:^5}", id);
+        }
+        for (auto &&[from, _] : this->machines)
+        {
+            ss << format("\n{:^5}", from);
+            for (auto &&[to, _] : this->machines)
+            {
+                ss << format("{:^5.2f}", this->distances[from][to]);
+            }
+        }
+        ss << "\n>";
         return ss.str();
     }
 
@@ -471,127 +601,21 @@ public:
         this->distances = other;
     }
 
-protected:
-    const TaskId job_begin_node_id = 0, job_end_node_id = 1;
-    TaskId next_task_id;
-    MachineId next_machine_id;
-    AGVId next_AGV_id;
-    double timestamp;
-    map<TaskId, TaskNodePtr> tasks;
-    map<MachineId, shared_ptr<Machine>> machines;
-    map<AGVId, shared_ptr<AGV>> AGVs;
-    map<MachineId, map<MachineId, double>> distances;
-};
-
-class RawJob;
-
-class SimplifiedJob : public Job<SimplifiedTask>
-{
-public:
-    using ProcessingTaskQueue = priority_queue<TaskId, vector<TaskId>, function<bool(TaskId, TaskId)>>;
-    using MovingAGVQueue = priority_queue<AGVId, vector<AGVId>, function<bool(AGVId, AGVId)>>;
-
-    SimplifiedJob() : Job<SimplifiedTask>(),
-                      processing_tasks(ProcessingTaskQueue(bind(&SimplifiedJob::task_time_compare, this, ph::_1, ph::_2))),
-                      moving_AGVs(MovingAGVQueue(bind(&SimplifiedJob::AGV_time_compare, this, ph::_1, ph::_2))) {}
-    shared_ptr<RawJob> to_raw();
-
-    TaskId add_task(
-        MachineType type,
-        double process_time,
-        TaskId raw_id,
-        size_t index,
-        optional<unordered_set<TaskId>> precursors,
-        optional<unordered_set<TaskId>> successors)
+    void set_rand_distance(double min_distance, double max_distance)
     {
-        auto node = make_shared<SimplifiedTask>(this->next_task_id++, type, process_time, raw_id, index);
-        node->status = TaskStatus::blocked;
-        this->tasks[node->id] = node;
-        this->set_task_relation(node->id, precursors, successors);
-        return node->id;
-    }
-
-    bool task_time_compare(TaskId a, TaskId b)
-    {
-        return get<shared_ptr<SimplifiedTask>>(this->tasks[a])->finish_timestamp < get<shared_ptr<SimplifiedTask>>(this->tasks[b])->finish_timestamp;
-    }
-
-    bool AGV_time_compare(AGVId a, AGVId b)
-    {
-        return this->AGVs[a]->finish_timestamp < this->AGVs[b]->finish_timestamp;
-    }
-
-    void wait()
-    {
-        if(!this->processing_tasks.empty() && !this->moving_AGVs.empty())
+        mt19937 engine(random_device{}());
+        uniform_real_distribution distance_dist(min_distance, max_distance);
+        for (auto [from_id, _] : this->machines)
         {
-            auto nearest_task = get<shared_ptr<SimplifiedTask>>(this->tasks[this->processing_tasks.top()]);
-            auto nearest_AGV = this->AGVs[this->moving_AGVs.top()];
-
-            if(nearest_task->finish_timestamp < nearest_AGV->finish_timestamp)
+            for (auto [to_id, _] : this->machines)
             {
-                this->processing_tasks.pop();
-                return this->wait_task(nearest_task->id);
-            }
-            else
-            {
-                this->moving_AGVs.pop();
-                return this->wait_AGV(nearest_AGV->id);
+                this->set_distance(from_id, to_id, from_id == to_id ? 0 : distance_dist(engine));
             }
         }
-
-        if(!this->processing_tasks.empty())
-        {
-            TaskId id = this->processing_tasks.top();
-            this->processing_tasks.pop();
-            return this->wait_task(id);
-        }
-
-        if(!this->moving_AGVs.empty())
-        {
-            AGVId id = this->moving_AGVs.top();
-            this->moving_AGVs.pop();
-            return this->wait_AGV(id);
-        }
     }
 
-    void wait_task(TaskId id)
-    {
-
-    }
-
-    void wait_AGV(AGVId id)
-    {
-
-    }
-
-    string identifier() override
-    {
-        return string("job(simplified)");
-    }
-
-private:
-    ProcessingTaskQueue processing_tasks;
-    MovingAGVQueue moving_AGVs;
-};
-
-class RawJob : public Job<RawTask>
-{
-public:
-    RawJob() : Job<RawTask>() {}
-    shared_ptr<SimplifiedJob> simplify();
-
-    TaskId add_task(MachineType type, double process_time, size_t count, optional<unordered_set<TaskId>> precursors, optional<unordered_set<TaskId>> successors)
-    {
-        auto node = make_shared<RawTask>(this->next_task_id++, type, process_time, count);
-        node->status = TaskStatus::blocked;
-        this->tasks[node->id] = node;
-        this->set_task_relation(node->id, precursors, successors);
-        return node->id;
-    }
-
-    static shared_ptr<RawJob> rand_generate(
-        size_t task_count,
+    static shared_ptr<Job> rand_generate(
+        vector<size_t> task_counts,
         size_t machine_count,
         size_t AGV_count,
         size_t machine_type_count,
@@ -605,13 +629,15 @@ public:
         {
             throw py::value_error();
         }
-        auto ret = make_shared<RawJob>();
+        auto ret = make_shared<Job>();
 
         mt19937 engine(random_device{}());
 
-        uniform_int_distribution<MachineType> machine_type_dist(0, machine_type_count - 1);
+        MachineType min_machine_type = Job::dummy_machine_type + 1;
+        MachineType max_machine_type = Job::dummy_machine_type + machine_type_count;
+        uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
         vector<MachineId> machines;
-        for (MachineType t = 0; t < machine_type_count; t++)
+        for (MachineType t = min_machine_type; t <= max_machine_type; t++)
         {
             machines.emplace_back(ret->add_machine(t));
         }
@@ -624,9 +650,9 @@ public:
         double max_distance = max_transport_time * min_speed;
         double min_distance = min_transport_time * max_speed;
         uniform_real_distribution distance_dist(min_distance, max_distance);
-        for (MachineId from_id = 0; from_id < machine_count; from_id++)
+        for (MachineId from_id : machines)
         {
-            for (MachineId to_id = 0; to_id < machine_count; to_id++)
+            for (MachineId to_id : machines)
             {
                 ret->set_distance(from_id, to_id, from_id == to_id ? 0 : distance_dist(engine));
             }
@@ -639,198 +665,404 @@ public:
             ret->add_AGV(AGV_speed_dist(engine), machines[machine_idx_dist(engine)]);
         }
 
-        vector<TaskId> exist_tasks;
         uniform_real_distribution<double> process_time_dist(min_process_time, max_process_time);
         discrete_distribution<size_t> prev_count_dist({3, 5, 3, 1});
         discrete_distribution<size_t> repeat_count_dist({5, 3, 1});
-        for (size_t i = 0; i < task_count; i++)
+        for (size_t task_count : task_counts)
         {
-            size_t prev_count = min(exist_tasks.size(), prev_count_dist(engine));
-            binomial_distribution<TaskId> prev_sampler(exist_tasks.size() - 1, 0.8);
-            unordered_set<TaskId> prevs;
-            for (size_t j = 0; j < prev_count; j++)
+            TaskId prev_id;
+            for (size_t i = 0; i < task_count; i++)
             {
-                TaskId sample = exist_tasks[prev_sampler(engine)];
-                while (prevs.contains(sample))
-                {
-                    sample = exist_tasks[prev_sampler(engine)];
-                }
-                prevs.insert(sample);
+                prev_id = ret->add_task(machine_type_dist(engine), process_time_dist(engine), i == 0 ? nullopt : optional{prev_id}, nullopt);
             }
-            exist_tasks.emplace_back(ret->add_task(machine_type_dist(engine), process_time_dist(engine), 1 + repeat_count_dist(engine), prevs, nullopt));
         }
 
         return ret;
     }
 
-    string identifier() override
+    shared_ptr<Job> copy()
     {
-        return string("job(raw)");
+        return make_shared<Job>(*this);
     }
+
+    /**
+     * - status == blocked (focus on predecessor)
+     * - status == waiting (... transport)
+     * - status == processing (... rest time)
+     * - status == need_transport (... transport)
+     * - status == waiting_transport (... ?)
+     * - status == transporting (... successor)
+     * - status == finished (... nothing, maybe)
+     * - total process time
+     * - status rest time (be 0 if not processing)
+     */
+    RepeatedTuple<double, task_feature_size> get_task_feature(shared_ptr<Task> task)
+    {
+        double status_is_blocked = task->status == TaskStatus::blocked ? 1.0 : 0.0;
+        double status_is_waiting = task->status == TaskStatus::waiting ? 1.0 : 0.0;
+        double status_is_processing = task->status == TaskStatus::processing ? 1.0 : 0.0;
+        double status_is_need_transport = task->status == TaskStatus::need_transport ? 1.0 : 0.0;
+        double status_is_waiting_transport = task->status == TaskStatus::waiting_transport ? 1.0 : 0.0;
+        double status_is_transporting = task->status == TaskStatus::transporting ? 1.0 : 0.0;
+        double status_is_finished = task->status == TaskStatus::finished ? 1.0 : 0.0;
+
+        double total_process_time = task->process_time;
+        double rest_process_time = status_is_processing ? (task->finish_timestamp - this->timestamp) : 0.0;
+
+        return {
+            status_is_blocked,
+            status_is_waiting,
+            status_is_processing,
+            status_is_need_transport,
+            status_is_waiting_transport,
+            status_is_transporting,
+            status_is_finished,
+            total_process_time,
+            rest_process_time,
+        };
+    }
+
+    RepeatedTuple<double, machine_feature_size> get_machine_feature(shared_ptr<Machine> machine)
+    {
+        return {0, 0, 0, 0, 0};
+    }
+
+    RepeatedTuple<double, AGV_feature_size> get_AGV_feature(shared_ptr<AGV> AGV)
+    {
+        return {0, 0, 0, 0, 0};
+    }
+
+    shared_ptr<JobFeatures> features();
+
+    void refresh_task_status()
+    {
+        // TODO
+    }
+
+    bool task_time_compare(TaskId a, TaskId b)
+    {
+        return get<shared_ptr<Task>>(this->tasks[a])->finish_timestamp > get<shared_ptr<Task>>(this->tasks[b])->finish_timestamp;
+    }
+
+    bool AGV_time_compare(AGVId a, AGVId b)
+    {
+        DEBUG_OUT("cmp {} : {:.2f} & ", a, this->AGVs[a]->finish_timestamp);
+        DEBUG_OUT("& {} : {:.2f}", b, this->AGVs[b]->finish_timestamp);
+        return this->AGVs[a]->finish_timestamp > this->AGVs[b]->finish_timestamp;
+    }
+
+    void _act_move(AGVId id, MachineId target)
+    {
+        auto AGV = this->AGVs[id];
+        assert(AGV->status == AGVStatus::idle);
+        AGV->target = target;
+        AGV->status = AGVStatus::moving;
+        AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+        this->moving_AGVs.push(id);
+    }
+
+    shared_ptr<Job> act_move(AGVId id, MachineId target)
+    {
+        auto ret = this->copy();
+        ret->_act_move(id, target);
+        return ret;
+    }
+
+    void _act_pick(AGVId id, MachineId target)
+    {
+        auto AGV = this->AGVs[id];
+        assert(AGV->status == AGVStatus::idle && !AGV->loaded_item.has_value());
+
+        if (target != this->dummy_machine_id)
+        {
+            auto target_machine = this->machines[target];
+            assert(target_machine->status == MachineStatus::holding_product);
+            assert(target_machine->working_task.has_value());
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
+            assert(transport_task->status == TaskStatus::need_transport);
+
+            AGV->target = target;
+            AGV->status = AGVStatus::picking;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+
+            transport_task->status = TaskStatus::waiting_transport;
+        }
+        else
+        {
+            AGV->target = target;
+            AGV->status = AGVStatus::picking;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+        }
+        DEBUG_OUT("push...");
+        this->moving_AGVs.push(id);
+        DEBUG_OUT("pushed!");
+    }
+
+    shared_ptr<Job> act_pick(AGVId id, MachineId target)
+    {
+        auto ret = this->copy();
+        ret->_act_pick(id, target);
+        return ret;
+    }
+
+    void _act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
+    {
+        auto AGV = this->AGVs[id];
+        assert(AGV->status == AGVStatus::idle && AGV->loaded_item.has_value());
+
+        bool from_begin = holds_alternative<shared_ptr<JobBegin>>(this->tasks[AGV->loaded_item.value()]);
+
+        if (_target_machine != this->dummy_machine_id)
+        {
+            auto target_machine = this->machines[_target_machine];
+            assert(target_machine->status == MachineStatus::idle);
+
+            auto target_task = get<shared_ptr<Task>>(this->tasks[_target_task]);
+            assert(target_task->status == TaskStatus::blocked);
+            assert(target_task->predecessor == AGV->loaded_item.value());
+            assert(target_task->machine_type == target_machine->type);
+
+            AGV->target = _target_machine;
+            AGV->status = AGVStatus::transporting;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
+
+            target_task->status = TaskStatus::waiting;
+
+            target_machine->status = MachineStatus::lack_of_material;
+            target_machine->working_task = target_task->id;
+        }
+        else
+        {
+            AGV->target = _target_machine;
+            AGV->status = AGVStatus::transporting;
+            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
+        }
+        this->moving_AGVs.push(id);
+    }
+
+    shared_ptr<Job> act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
+    {
+        auto ret = this->copy();
+        ret->_act_transport(id, _target_task, _target_machine);
+        return ret;
+    }
+
+    void _wait(double delta_time)
+    {
+        double nearest_task_finish_time = DBL_MAX;
+        double nearest_AGV_finish_time = DBL_MAX;
+        if (!this->processing_tasks.empty())
+        {
+            nearest_task_finish_time = get<shared_ptr<Task>>(this->tasks[this->processing_tasks.top()])->finish_timestamp;
+        }
+
+        if (!this->moving_AGVs.empty())
+        {
+            nearest_AGV_finish_time = this->AGVs[this->moving_AGVs.top()]->finish_timestamp;
+        }
+
+        if (nearest_task_finish_time <= this->timestamp + delta_time)
+        {
+            wait_task();
+        }
+        else if (nearest_AGV_finish_time <= this->timestamp + delta_time)
+        {
+            wait_AGV();
+        }
+        else
+        {
+            this->timestamp += delta_time;
+        }
+    }
+
+    shared_ptr<Job> wait(double delta_time)
+    {
+        auto ret = this->copy();
+        ret->_wait(delta_time);
+        return ret;
+    }
+
+    void wait_task()
+    {
+        auto task = get<shared_ptr<Task>>(this->tasks[this->processing_tasks.top()]);
+        this->processing_tasks.pop();
+        assert(task->status == TaskStatus::processing);
+        this->timestamp = task->finish_timestamp;
+        task->status = TaskStatus::need_transport;
+        auto machine = this->machines[task->processing_machine.value()];
+        assert(machine->status == MachineStatus::working);
+        machine->status = MachineStatus::holding_product;
+    }
+
+    void wait_AGV()
+    {
+        auto AGV = this->AGVs[this->moving_AGVs.top()];
+        this->moving_AGVs.pop();
+
+        this->timestamp = AGV->finish_timestamp;
+
+        switch (AGV->status)
+        {
+        case AGVStatus::moving:
+        {
+            AGV->status = AGVStatus::idle;
+            AGV->position = AGV->target;
+            break;
+        }
+        case AGVStatus::picking:
+        {
+            auto target_machine = this->machines[AGV->target];
+            if (target_machine->id != this->dummy_machine_id)
+            {
+                assert(target_machine->status == MachineStatus::holding_product);
+                assert(target_machine->working_task.has_value());
+            }
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
+            assert(transport_task->status == TaskStatus::need_transport);
+
+            AGV->status = AGVStatus::idle;
+            AGV->position = AGV->target;
+            AGV->loaded_item = transport_task->id;
+
+            target_machine->status = MachineStatus::idle;
+            target_machine->working_task = nullopt;
+
+            transport_task->status = TaskStatus::transporting;
+
+            break;
+        }
+
+        case AGVStatus::transporting:
+        {
+            auto target_machine = this->machines[AGV->target];
+            assert(target_machine->status == MachineStatus::lack_of_material);
+
+            auto transport_task = get<shared_ptr<Task>>(this->tasks[AGV->loaded_item.value()]);
+            assert(transport_task->status == TaskStatus::transporting);
+
+            auto target_task = get<shared_ptr<Task>>(this->tasks[transport_task->successor]);
+            assert(target_task->status == TaskStatus::waiting);
+            assert(target_task->machine_type == target_machine->type);
+
+            AGV->status = AGVStatus::idle;
+            AGV->loaded_item = nullopt;
+
+            target_machine->status = MachineStatus::working;
+
+            transport_task->status = TaskStatus::finished;
+
+            target_task->status = TaskStatus::processing;
+            target_task->finish_timestamp = this->timestamp + target_task->process_time;
+
+            break;
+        }
+
+        default:
+            throw logic_error(format("wrong AGV status: {}", enum_string(AGV->status)));
+        }
+    }
+
+protected:
+    TaskId next_task_id;
+    MachineId next_machine_id;
+    AGVId next_AGV_id;
+
+    double timestamp;
+
+    map<TaskId, TaskNodePtr> tasks;
+    map<MachineId, shared_ptr<Machine>> machines;
+    map<AGVId, shared_ptr<AGV>> AGVs;
+
+    map<MachineId, map<MachineId, double>> distances;
+
+    ProcessingTaskQueue processing_tasks;
+    MovingAGVQueue moving_AGVs;
 };
 
-shared_ptr<RawJob> SimplifiedJob::to_raw()
+struct JobFeatures
 {
-    auto raw = make_shared<RawJob>();
-    map<TaskId, size_t> indegrees;
-    for (auto &&[id, ptr] : this->tasks)
-    {
-        visit([&indegrees, id](auto p)
-              { indegrees[id] = static_pointer_cast<Task>(p)->precursors.size(); }, ptr);
-    }
-    map<TaskId, TaskId> id_mapper;
+    vector<RepeatedTuple<double, Job::task_feature_size>> task_features;
+    vector<RepeatedTuple<optional<size_t>, 2>> task_relations;
+    vector<RepeatedTuple<double, Job::machine_feature_size>> machine_features;
+    vector<vector<double>> processable_machine_mask;
+    vector<RepeatedTuple<double, Job::AGV_feature_size>> AGV_features;
+};
 
-    bool finished;
-    do
-    {
-        finished = true;
-        auto filter = views::filter([&id_mapper](const pair<TaskId, size_t> &pair)
-                                    { return pair.second == 0 && !id_mapper.contains(pair.first); });
-        for (auto [id, ind] : indegrees | filter)
-        {
-            finished = false;
-            auto &&simplified_node = this->tasks[id];
-            if (holds_alternative<shared_ptr<SimplifiedTask>>(simplified_node))
-            {
-                auto &&task_node = get<shared_ptr<SimplifiedTask>>(simplified_node);
-                id_mapper[id] = task_node->raw_id;
-
-                if (!raw->contains(task_node->raw_id))
-                {
-                    unordered_set<TaskId> precursors;
-                    for (auto &&precursor : task_node->precursors)
-                    {
-                        precursors.insert(id_mapper[precursor]);
-                    }
-                    auto new_id = raw->add_task(task_node->machine_type, task_node->process_time, 1, precursors, nullopt);
-                    auto new_node = get<shared_ptr<RawTask>>(raw->get_task_node(new_id));
-                    new_node->current = task_node->status == TaskStatus::finished ? 1 : 0;
-                    new_node->status = task_node->status;
-                }
-                else
-                {
-                    auto exist_node = raw->get_task_node(task_node->raw_id);
-                    if (holds_alternative<shared_ptr<RawTask>>(exist_node))
-                    {
-                        auto &&exist_raw = get<shared_ptr<RawTask>>(exist_node);
-                        exist_raw->count++;
-                        if (task_node->status == TaskStatus::finished)
-                        {
-                            exist_raw->current++;
-                        }
-                        else if (exist_raw->status != TaskStatus::waiting)
-                        {
-                            exist_raw->status = task_node->status;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                id_mapper[id] = id;
-            }
-            visit([&indegrees](auto &&node)
-                  { for(auto&& successor : static_pointer_cast<Task>(node)->successors)
-                            indegrees[successor]--; },
-                  simplified_node);
-        }
-    } while (!finished);
-    if (id_mapper.size() != this->tasks.size())
-    {
-        cout << "graph has a cycle" << endl;
-        throw exception();
-    }
-
-    for (auto &&[id, machine] : this->machines)
-    {
-        raw->add_machine(machine->type);
-    }
-
-    raw->set_distance(this->distances);
-
-    return raw;
-}
-
-shared_ptr<SimplifiedJob> RawJob::simplify()
+shared_ptr<JobFeatures> Job::features()
 {
-    auto simplified = make_shared<SimplifiedJob>();
-    map<TaskId, size_t> indegrees;
-    for (auto &&[id, ptr] : this->tasks)
-    {
-        visit([&indegrees, id](auto p)
-              { indegrees[id] = static_pointer_cast<Task>(p)->precursors.size(); }, ptr);
-    }
-    map<TaskId, unordered_set<TaskId>> id_mapper;
+    auto ret = make_shared<JobFeatures>();
 
-    bool finished;
-    do
+    vector<shared_ptr<Task>> normal_tasks;
+    for (auto [_, ptr] : this->tasks)
     {
-        finished = true;
-        auto filter = views::filter([&id_mapper](const pair<TaskId, size_t> &pair)
-                                    { return pair.second == 0 && !id_mapper.contains(pair.first); });
-        for (auto [id, ind] : indegrees | filter)
+        if (holds_alternative<shared_ptr<Task>>(ptr))
         {
-            finished = false;
-            auto &&raw_node = this->tasks[id];
-            id_mapper[id] = unordered_set<TaskId>{};
-            if (holds_alternative<shared_ptr<RawTask>>(raw_node))
-            {
-                auto &&task_node = get<shared_ptr<RawTask>>(raw_node);
-                TaskId prev_id;
-                for (size_t idx = 0; idx < task_node->count; idx++)
-                {
-                    unordered_set<TaskId> precursors;
-                    for (TaskId raw_precursor : task_node->precursors)
-                    {
-                        precursors.insert_range(id_mapper[raw_precursor]);
-                    }
-                    if (idx != 0)
-                    {
-                        precursors.insert(prev_id);
-                    }
-                    TaskId new_id = simplified->add_task(task_node->machine_type, task_node->process_time, id, idx, precursors, nullopt);
-                    auto new_task = get<shared_ptr<SimplifiedTask>>(simplified->get_task_node(new_id));
-                    switch (comp2int(new_task->index <=> task_node->current))
-                    {
-                    case 1:
-                        new_task->status = TaskStatus::blocked;
-                        break;
-                    case 0:
-                        new_task->status = task_node->status;
-                        break;
-                    case -1:
-                        new_task->status = TaskStatus::finished;
-                        break;
-                    }
-                    id_mapper[id].insert(new_id);
-                    id_mapper[id].erase(prev_id);
-                    prev_id = new_id;
-                }
-            }
-            else
-            {
-                id_mapper[id].insert(id);
-            }
-            visit([&indegrees](auto &&node)
-                  { for(auto&& successor : static_pointer_cast<Task>(node)->successors)
-                            indegrees[successor]--; },
-                  raw_node);
+            normal_tasks.emplace_back(get<shared_ptr<Task>>(ptr));
         }
-    } while (!finished);
-    if (id_mapper.size() != this->tasks.size())
-    {
-        cout << "graph has a cycle" << endl;
-        throw exception();
     }
 
-    for (auto &&[id, machine] : this->machines)
-    {
-        simplified->add_machine(machine->type);
-    }
+    ret->task_features.resize(normal_tasks.size());
+    auto tasks_with_idx = views::enumerate(normal_tasks);
+    map<TaskId, size_t> task_id_idx_mapper;
+    ::std::for_each(execution::par_unseq, tasks_with_idx.begin(), tasks_with_idx.end(),
+                    [ret, this, &task_id_idx_mapper](tuple<ptrdiff_t, shared_ptr<Task>> i_task)
+                    {
+                        auto [i, task] = i_task;
+                        ret->task_features[i] = this->get_task_feature(task);
+                        task_id_idx_mapper[task->id] = static_cast<size_t>(i);
+                    });
 
-    simplified->set_distance(this->distances);
+    ret->machine_features.resize(this->machines.size());
+    auto machine_with_idx = views::enumerate(this->machines | views::transform([](auto kv)
+                                                                               { return kv.second; }));
+    map<MachineId, size_t> machine_id_idx_mapper;
+    map<MachineType, vector<double>> machine_type_idx_mask;
+    ::std::for_each(execution::par_unseq, machine_with_idx.begin(), machine_with_idx.end(),
+                    [ret,
+                     this,
+                     &machine_id_idx_mapper,
+                     &machine_type_idx_mask](tuple<ptrdiff_t, shared_ptr<Machine>> i_machine)
+                    {
+                        auto [i, machine] = i_machine;
+                        ret->machine_features[i] = Job::get_machine_feature(machine);
+                        machine_id_idx_mapper[machine->id] = static_cast<size_t>(i);
+                        auto [iter, _] = machine_type_idx_mask.try_emplace(machine->type, vector<double>(this->machines.size(), 0));
+                        iter->second[i] = 1;
+                    });
 
-    return simplified;
+    ret->task_relations.resize(normal_tasks.size());
+    ret->processable_machine_mask.resize(normal_tasks.size());
+    ::std::for_each(execution::par_unseq, tasks_with_idx.begin(), tasks_with_idx.end(),
+                    [ret,
+                     this,
+                     &task_id_idx_mapper,
+                     &machine_type_idx_mask](tuple<ptrdiff_t, shared_ptr<Task>> i_task)
+                    {
+                        auto [i, task] = i_task;
+                        optional<size_t> p = task->predecessor == this->begin_task_id
+                                                 ? nullopt
+                                                 : optional{task_id_idx_mapper[task->predecessor]};
+                        optional<size_t> s = task->successor == this->end_task_id
+                                                 ? nullopt
+                                                 : optional{task_id_idx_mapper[task->successor]};
+                        ret->task_relations[i] = {p, s};
+                        ret->processable_machine_mask[i] = machine_type_idx_mask[task->machine_type];
+                    });
+
+    ret->AGV_features.resize(this->AGVs.size());
+    auto AGV_with_idx = views::enumerate(this->AGVs | views::transform([](auto kv)
+                                                                       { return kv.second; }));
+    ::std::for_each(execution::par_unseq, AGV_with_idx.begin(), AGV_with_idx.end(),
+                    [ret,
+                     this](tuple<ptrdiff_t, shared_ptr<AGV>> i_AGV)
+                    {
+                        auto [i, AGV] = i_AGV;
+                        ret->AGV_features[i] = Job::get_AGV_feature(AGV);
+                    });
+
+    return ret;
 }
 
 using namespace py::literals;
@@ -840,49 +1072,61 @@ PYBIND11_MODULE(graph, m)
     py::enum_<TaskStatus>(m, "TaskStatus")
         .value("blocked", TaskStatus::blocked)
         .value("waiting", TaskStatus::waiting)
+        .value("need_transport", TaskStatus::need_transport)
+        .value("waiting_transport", TaskStatus::waiting_transport)
+        .value("transporting", TaskStatus::transporting)
         .value("finished", TaskStatus::finished);
     py::enum_<MachineStatus>(m, "MachineStatus")
         .value("idle", MachineStatus::idle)
-        .value("working", MachineStatus::working);
+        .value("lack_of_material", MachineStatus::lack_of_material)
+        .value("working", MachineStatus::working)
+        .value("holding_product", MachineStatus::holding_product);
 
-    py::class_<JobBegin>(m, "JobBegin")
+    py::class_<JobBegin, shared_ptr<JobBegin>>(m, "JobBegin")
         .def("__repr__", &JobBegin::repr);
-    py::class_<JobEnd>(m, "JobEnd")
+    py::class_<JobEnd, shared_ptr<JobEnd>>(m, "JobEnd")
         .def("__repr__", &JobEnd::repr);
-    py::class_<RawTask>(m, "RawTask")
-        .def("__repr__", &RawTask::repr);
-    py::class_<SimplifiedTask>(m, "SimplifiedTask")
-        .def("__repr__", &SimplifiedTask::repr);
+    py::class_<Task, shared_ptr<Task>>(m, "Task")
+        .def("__repr__", &Task::repr);
 
-    py::class_<Machine>(m, "Machine")
+    py::class_<Machine, shared_ptr<Machine>>(m, "Machine")
         .def("__repr__", &Machine::repr);
 
-    py::class_<AGV>(m, "AGV")
+    py::class_<AGV, shared_ptr<AGV>>(m, "AGV")
         .def("__repr__", &AGV::repr);
 
-    py::class_<SimplifiedJob, shared_ptr<SimplifiedJob>>(m, "SimplifiedJob")
+    py::class_<Job, shared_ptr<Job>>(m, "Job")
         .def(py::init<>())
-        .def("add_task", &SimplifiedJob::add_task)
-        .def("add_relation", &SimplifiedJob::add_relation)
-        .def("remove_relation", &SimplifiedJob::remove_relation)
-        .def("get_task_node", &SimplifiedJob::get_task_node)
-        .def("add_machine", &SimplifiedJob::add_machine)
-        .def("get_machine_node", &SimplifiedJob::get_machine_node)
-        .def("to_raw", &SimplifiedJob::to_raw)
-        .def("__repr__", &SimplifiedJob::repr);
-    py::class_<RawJob, shared_ptr<RawJob>>(m, "RawJob")
-        .def(py::init<>())
-        .def("add_task", &RawJob::add_task, "machine_type"_a, "process_time"_a, "repeat_count"_a = 1, "precursors"_a = nullopt, "successors"_a = nullopt)
-        .def("add_relation", &RawJob::add_relation, "from"_a, "to"_a)
-        .def("remove_relation", &RawJob::remove_relation, "from"_a, "to"_a)
-        .def("remove_task", &RawJob::remove_task, "task_id"_a)
-        .def("get_task_node", &RawJob::get_task_node, "task_id"_a)
-        .def("add_machine", &RawJob::add_machine, "machine_type"_a)
-        .def("get_machine_node", &RawJob::get_machine_node, "machine_id"_a)
-        .def("get_travel_time", &RawJob::get_travel_time, "from"_a, "to"_a, "agv"_a)
-        .def("set_distance", py::overload_cast<MachineId, MachineId, double>(&RawJob::set_distance))
-        .def("set_distance", py::overload_cast<map<MachineId, map<MachineId, double>> &>(&RawJob::set_distance))
-        .def("simplify", &RawJob::simplify)
-        .def_static("rand_generate", &RawJob::rand_generate, "task_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
-        .def("__repr__", &RawJob::repr);
+        .def("add_task", &Job::add_task, "machine_type"_a, "process_time"_a, "predecessors"_a = nullopt, "successors"_a = nullopt)
+        .def("remove_task", &Job::remove_task, "task_id"_a)
+        .def("get_task", &Job::get_task, "task_id"_a)
+        .def("add_machine", &Job::add_machine, "machine_type"_a)
+        .def("get_machine", &Job::get_machine, "machine_id"_a)
+        .def("add_AGV", &Job::add_AGV, "speed"_a, "init_pos"_a)
+        .def("get_AGV", &Job::get_AGV, "AGV_id"_a)
+        .def("get_travel_time", &Job::get_travel_time, "from"_a, "to"_a, "agv"_a)
+        .def("set_distance", py::overload_cast<MachineId, MachineId, double>(&Job::set_distance), "from"_a, "to"_a, "distance"_a)
+        .def("set_distance", py::overload_cast<map<MachineId, map<MachineId, double>> &>(&Job::set_distance), "data"_a)
+        .def("set_rand_distance", &Job::set_rand_distance, "min_dist"_a, "max_dist"_a)
+        .def_static("rand_generate", &Job::rand_generate, "task_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
+        .def("features", &Job::features)
+        .def("copy", &Job::copy)
+        .def("act_move", &Job::act_move, "AGV_id"_a, "target_machine"_a)
+        .def("act_pick", &Job::act_pick, "AGV_id"_a, "target_machine"_a)
+        .def("act_transport", &Job::act_transport, "AGV_id"_a, "target_task"_a, "target_machine"_a)
+        .def("wait", &Job::wait, "delta_time"_a)
+        .def("__repr__", &Job::repr)
+        .def_readonly_static("begin_task_id", &Job::begin_task_id)
+        .def_readonly_static("end_task_id", &Job::end_task_id)
+        .def_readonly_static("dummy_machine_id", &Job::dummy_machine_id)
+        .def_readonly_static("task_feature_size", &Job::task_feature_size)
+        .def_readonly_static("machine_feature_size", &Job::machine_feature_size)
+        .def_readonly_static("AGV_feature_size", &Job::AGV_feature_size);
+
+    py::class_<JobFeatures, shared_ptr<JobFeatures>>(m, "JobFeatures")
+        .def_readonly("task_features", &JobFeatures::task_features)
+        .def_readonly("task_relations", &JobFeatures::task_relations)
+        .def_readonly("machine_features", &JobFeatures::machine_features)
+        .def_readonly("processable_machine_mask", &JobFeatures::processable_machine_mask)
+        .def_readonly("AGV_features", &JobFeatures::AGV_features);
 }

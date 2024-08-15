@@ -26,7 +26,12 @@ Push-Location build
 
 cmake ..
 
-cmake --build . --config Release
+if ($args.Count -eq 0) {
+    cmake --build . --config Release
+}
+else {
+    cmake --build . --config $args[0]
+}
 
 Pop-Location
 
