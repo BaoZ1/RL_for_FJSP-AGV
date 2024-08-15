@@ -11,7 +11,7 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 .vscode
-test.py
+test.*
 binds/build
 binds/*.pyd
 binds/*.pyi
