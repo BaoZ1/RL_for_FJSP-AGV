@@ -12,7 +12,6 @@
 
 #include <map>
 #include <tuple>
-#include <array>
 #include <unordered_set>
 #include <sstream>
 #include <string>
@@ -39,7 +38,8 @@ using MachineType = size_t;
 enum class TaskStatus
 {
     blocked,
-    waiting,
+    waiting_machine,
+    waiting_material,
     processing,
     need_transport,
     waiting_transport,
@@ -53,8 +53,10 @@ constexpr string enum_string(TaskStatus s)
     {
     case TaskStatus::blocked:
         return string("blocked");
-    case TaskStatus::waiting:
-        return string("waiting");
+    case TaskStatus::waiting_machine:
+        return string("waiting_machine");
+    case TaskStatus::waiting_material:
+        return string("waiting_material");
     case TaskStatus::processing:
         return string("processing");
     case TaskStatus::need_transport:
@@ -120,6 +122,28 @@ constexpr string enum_string(AGVStatus s)
     }
 }
 
+enum class ActionType
+{
+    move,
+    pick,
+    transport
+};
+
+constexpr string enum_string(ActionType t)
+{
+    switch (t)
+    {
+    case ActionType::move:
+        return string("move");
+    case ActionType::pick:
+        return string("pick");
+    case ActionType::transport:
+        return string("transport");
+    default:
+        throw pybind11::value_error();
+    }
+}
+
 string id_set_string(const unordered_set<TaskId> &s)
 {
     stringstream ss;
@@ -180,11 +204,14 @@ string o2s(optional<T> o, string on_empty = "null")
 
 struct TaskBase
 {
-    TaskBase(TaskId id, MachineType mt) : id(id), machine_type(mt) {}
+    TaskBase(TaskId id, MachineType mt) : id(id),
+                                          machine_type(mt),
+                                          status(TaskStatus::blocked) {}
 
     virtual string repr() = 0;
 
     TaskId id;
+    TaskStatus status;
 
     MachineType machine_type;
 };
@@ -199,40 +226,43 @@ shared_ptr<TaskBase> to_task_base_ptr(variant<shared_ptr<Types>...> wrapped)
 
 struct JobBegin : public TaskBase
 {
-    JobBegin(TaskId id, MachineType mt) : TaskBase(id, mt) {}
+    JobBegin(TaskId id, MachineType mt) : TaskBase(id, mt), sent_count(0), arrived_count(0) {}
 
     string repr() override
     {
         stringstream ss;
-        ss << format("<begin (id: {})\n", this->id);
+        ss << format("<begin (id: {}, total: {}, sent: {}, status: {})\n",
+                     this->id, this->successors.size(), this->sent_count, enum_string(this->status));
         ss << add_indent(format("s: {}", id_set_string(this->successors)));
         ss << "\n>";
         return ss.str();
     }
 
     unordered_set<TaskId> successors;
+    size_t sent_count, arrived_count;
 };
 
 struct JobEnd : public TaskBase
 {
-    JobEnd(TaskId id, MachineType mt) : TaskBase(id, mt) {}
+    JobEnd(TaskId id, MachineType mt) : TaskBase(id, mt), recive_cound(0) {}
 
     string repr() override
     {
         stringstream ss;
-        ss << format("<end (id: {})\n", this->id);
+        ss << format("<end (id: {}, total: {}, recived: {}, status: {})\n",
+                     this->id, this->predecessors.size(), this->recive_cound, enum_string(this->status));
         ss << add_indent(format("p: {}", id_set_string(this->predecessors)));
         ss << "\n>";
         return ss.str();
     }
 
     unordered_set<TaskId> predecessors;
+    size_t recive_cound;
 };
 
 struct Task : public TaskBase
 {
     Task(TaskId id, MachineType mt, double pt) : TaskBase(id, mt),
-                                                 status(TaskStatus::blocked),
                                                  process_time(pt),
                                                  finish_timestamp(0),
                                                  processing_machine(nullopt) {}
@@ -240,15 +270,22 @@ struct Task : public TaskBase
     string repr() override
     {
         stringstream ss;
-        ss << format("<task (id: {}, type: {}, process_time: {:.2f}, status: {})\n",
-                     this->id, this->machine_type, this->process_time, enum_string(this->status));
+        if (this->status != TaskStatus::processing)
+        {
+            ss << format("<task (id: {}, type: {}, process_time: {:.2f}, status: {})\n",
+                         this->id, this->machine_type, this->process_time, enum_string(this->status));
+        }
+        else
+        {
+            ss << format("<task (id: {}, type: {}, process_time: {:.2f}, status: {}, finish_timestamp: {:.2f})\n",
+                         this->id, this->machine_type, this->process_time, enum_string(this->status), this->finish_timestamp);
+        }
+
         ss << add_indent(format("p: {}", this->predecessor));
         ss << add_indent(format("s: {}", this->successor));
         ss << "\n>";
         return ss.str();
     }
-
-    TaskStatus status;
 
     double process_time;
     double finish_timestamp;
@@ -283,6 +320,7 @@ struct AGV
                                                       status(AGVStatus::idle),
                                                       position(init_pos),
                                                       target(0),
+                                                      transport_target(nullopt),
                                                       finish_timestamp(0),
                                                       loaded_item(nullopt) {}
     string repr()
@@ -304,6 +342,7 @@ struct AGV
     double speed;
     AGVStatus status;
     MachineId position, target;
+    optional<TaskId> transport_target;
     double finish_timestamp;
     optional<TaskId> loaded_item;
 };
@@ -372,6 +411,19 @@ private:
     Comp comp;
 };
 
+struct Action
+{
+    Action(ActionType type, AGVId agv, MachineId m, optional<TaskId> t = nullopt) : type(type),
+                                                                                    act_AGV(agv),
+                                                                                    target_machine(m),
+                                                                                    target_task(t) {}
+
+    ActionType type;
+    AGVId act_AGV;
+    MachineId target_machine;
+    optional<TaskId> target_task;
+};
+
 struct JobFeatures;
 
 class Job
@@ -386,13 +438,14 @@ public:
     static const MachineId dummy_machine_id = 0;
     static const MachineType dummy_machine_type = 0;
 
-    static const size_t task_feature_size = 9;
+    static const size_t task_feature_size = 10;
     static const size_t machine_feature_size = 5;
     static const size_t AGV_feature_size = 5;
 
     Job() : timestamp(0),
             processing_tasks(ProcessingTaskQueue(bind(&Job::task_time_compare, this, ph::_1, ph::_2))),
-            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2)))
+            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2))),
+            available_actions(nullopt)
     {
         this->tasks[this->begin_task_id] = make_shared<JobBegin>(this->begin_task_id, this->dummy_machine_type);
         this->tasks[this->end_task_id] = make_shared<JobEnd>(this->end_task_id, this->dummy_machine_type);
@@ -405,7 +458,8 @@ public:
     }
 
     Job(const Job &other) : processing_tasks(ProcessingTaskQueue(bind(&Job::task_time_compare, this, ph::_1, ph::_2))),
-                            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2)))
+                            moving_AGVs(MovingAGVQueue(bind(&Job::AGV_time_compare, this, ph::_1, ph::_2))),
+                            available_actions(nullopt)
     {
         for (auto [id, ptr] : other.tasks)
         {
@@ -680,6 +734,22 @@ public:
         return ret;
     }
 
+    void init_task_status()
+    {
+        auto begin_task = get<shared_ptr<JobBegin>>(this->tasks[this->begin_task_id]);
+        begin_task->status = TaskStatus::need_transport;
+        this->machines[this->dummy_machine_id]->status = MachineStatus::holding_product;
+        for (TaskId id : begin_task->successors)
+        {
+            auto task = get<shared_ptr<Task>>(this->tasks[id]);
+            if (task->status == TaskStatus::blocked)
+            {
+                task->status = TaskStatus::waiting_machine;
+            }
+        }
+        get<shared_ptr<JobEnd>>(this->tasks[this->end_task_id])->status = TaskStatus::blocked;
+    }
+
     shared_ptr<Job> copy()
     {
         return make_shared<Job>(*this);
@@ -687,10 +757,11 @@ public:
 
     /**
      * - status == blocked (focus on predecessor)
-     * - status == waiting (... transport)
+     * - status == waiting_machine (... transport)
+     * - status == waiting_material (just wait)
      * - status == processing (... rest time)
      * - status == need_transport (... transport)
-     * - status == waiting_transport (... ?)
+     * - status == waiting_transport (just wait)
      * - status == transporting (... successor)
      * - status == finished (... nothing, maybe)
      * - total process time
@@ -699,7 +770,8 @@ public:
     RepeatedTuple<double, task_feature_size> get_task_feature(shared_ptr<Task> task)
     {
         double status_is_blocked = task->status == TaskStatus::blocked ? 1.0 : 0.0;
-        double status_is_waiting = task->status == TaskStatus::waiting ? 1.0 : 0.0;
+        double status_is_waiting_machine = task->status == TaskStatus::waiting_machine ? 1.0 : 0.0;
+        double status_is_waiting_material = task->status == TaskStatus::waiting_material ? 1.0 : 0.0;
         double status_is_processing = task->status == TaskStatus::processing ? 1.0 : 0.0;
         double status_is_need_transport = task->status == TaskStatus::need_transport ? 1.0 : 0.0;
         double status_is_waiting_transport = task->status == TaskStatus::waiting_transport ? 1.0 : 0.0;
@@ -711,7 +783,8 @@ public:
 
         return {
             status_is_blocked,
-            status_is_waiting,
+            status_is_waiting_machine,
+            status_is_waiting_material,
             status_is_processing,
             status_is_need_transport,
             status_is_waiting_transport,
@@ -724,19 +797,119 @@ public:
 
     RepeatedTuple<double, machine_feature_size> get_machine_feature(shared_ptr<Machine> machine)
     {
+        // TODO
         return {0, 0, 0, 0, 0};
     }
 
     RepeatedTuple<double, AGV_feature_size> get_AGV_feature(shared_ptr<AGV> AGV)
     {
+        // TODO
         return {0, 0, 0, 0, 0};
     }
 
     shared_ptr<JobFeatures> features();
 
-    void refresh_task_status()
+    bool finished()
     {
-        // TODO
+        return get<shared_ptr<JobEnd>>(this->tasks[this->end_task_id])->status == TaskStatus::finished;
+    }
+
+    vector<Action> get_available_actions()
+    {
+        if (this->available_actions.has_value())
+        {
+            return this->available_actions.value();
+        }
+
+        vector<Action> ret;
+
+        vector<shared_ptr<Machine>> idle_machines;
+        vector<MachineId> pickable_machines;
+        for (auto [id, machine] : this->machines)
+        {
+            switch (machine->status)
+            {
+            case MachineStatus::idle:
+                idle_machines.push_back(machine);
+                break;
+            case MachineStatus::holding_product:
+                if (id == this->dummy_machine_id || to_task_base_ptr(this->tasks[machine->working_task.value()])->status == TaskStatus::need_transport)
+                {
+                    pickable_machines.push_back(id);
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        for (auto [AGV_id, AGV] : this->AGVs)
+        {
+            if (AGV->status != AGVStatus::idle)
+            {
+                continue;
+            }
+            if (AGV->loaded_item.has_value())
+            {
+                visit([&]<typename T>(shared_ptr<T> task)
+                      {
+                    if constexpr (is_same_v<T, JobBegin>)
+                    {
+                        for(TaskId sid : task->successors)
+                        {
+                            auto s = get<shared_ptr<Task>>(this->tasks[sid]);
+                            if(s->status == TaskStatus::waiting_machine)
+                            {
+                                for(auto machine : idle_machines)
+                                {
+                                    if(machine->type == s->machine_type)
+                                    {
+                                        ret.emplace_back(ActionType::transport, AGV_id, machine->id, sid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if constexpr (is_same_v<T, Task>)
+                    {
+                        if(task->successor == this->end_task_id)
+                        {
+                            ret.emplace_back(ActionType::transport, AGV_id, this->dummy_machine_id, task->successor);
+                        }
+                        else
+                        {
+                            for(auto machine : idle_machines)
+                            {
+                                if(machine->type == to_task_base_ptr(this->tasks[task->successor])->machine_type)
+                                {
+                                    ret.emplace_back(ActionType::transport, AGV_id, machine->id, task->successor);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        unreachable();
+                    } }, this->tasks[AGV->loaded_item.value()]);
+            }
+            else
+            {
+                for (auto machine_id : pickable_machines)
+                {
+                    ret.emplace_back(ActionType::pick, AGV_id, machine_id);
+                }
+                for (auto machine_id : this->machines | views::keys)
+                {
+                    if (machine_id == AGV->position)
+                    {
+                        continue;
+                    }
+                    ret.emplace_back(ActionType::move, AGV_id, machine_id);
+                }
+            }
+        }
+        this->available_actions = ret;
+        return ret;
     }
 
     bool task_time_compare(TaskId a, TaskId b)
@@ -746,12 +919,10 @@ public:
 
     bool AGV_time_compare(AGVId a, AGVId b)
     {
-        DEBUG_OUT("cmp {} : {:.2f} & ", a, this->AGVs[a]->finish_timestamp);
-        DEBUG_OUT("& {} : {:.2f}", b, this->AGVs[b]->finish_timestamp);
         return this->AGVs[a]->finish_timestamp > this->AGVs[b]->finish_timestamp;
     }
 
-    void _act_move(AGVId id, MachineId target)
+    void act_move(AGVId id, MachineId target)
     {
         auto AGV = this->AGVs[id];
         assert(AGV->status == AGVStatus::idle);
@@ -761,14 +932,7 @@ public:
         this->moving_AGVs.push(id);
     }
 
-    shared_ptr<Job> act_move(AGVId id, MachineId target)
-    {
-        auto ret = this->copy();
-        ret->_act_move(id, target);
-        return ret;
-    }
-
-    void _act_pick(AGVId id, MachineId target)
+    void act_pick(AGVId id, MachineId target)
     {
         auto AGV = this->AGVs[id];
         assert(AGV->status == AGVStatus::idle && !AGV->loaded_item.has_value());
@@ -793,23 +957,23 @@ public:
             AGV->target = target;
             AGV->status = AGVStatus::picking;
             AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+
+            auto begin_task = get<shared_ptr<JobBegin>>(this->tasks[this->begin_task_id]);
+            begin_task->sent_count++;
+            if (begin_task->sent_count == begin_task->successors.size())
+            {
+                begin_task->status = TaskStatus::transporting;
+                this->machines[this->dummy_machine_id]->status = MachineStatus::lack_of_material;
+            }
         }
-        DEBUG_OUT("push...");
         this->moving_AGVs.push(id);
-        DEBUG_OUT("pushed!");
     }
 
-    shared_ptr<Job> act_pick(AGVId id, MachineId target)
-    {
-        auto ret = this->copy();
-        ret->_act_pick(id, target);
-        return ret;
-    }
-
-    void _act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
+    void act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
     {
         auto AGV = this->AGVs[id];
         assert(AGV->status == AGVStatus::idle && AGV->loaded_item.has_value());
+        assert(!AGV->transport_target.has_value());
 
         bool from_begin = holds_alternative<shared_ptr<JobBegin>>(this->tasks[AGV->loaded_item.value()]);
 
@@ -817,34 +981,45 @@ public:
         {
             auto target_machine = this->machines[_target_machine];
             assert(target_machine->status == MachineStatus::idle);
+            target_machine->status = MachineStatus::lack_of_material;
 
             auto target_task = get<shared_ptr<Task>>(this->tasks[_target_task]);
-            assert(target_task->status == TaskStatus::blocked);
+            assert(target_task->status == TaskStatus::waiting_machine);
             assert(target_task->predecessor == AGV->loaded_item.value());
             assert(target_task->machine_type == target_machine->type);
+            target_task->status = TaskStatus::waiting_material;
 
-            AGV->target = _target_machine;
-            AGV->status = AGVStatus::transporting;
-            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
-
-            target_task->status = TaskStatus::waiting;
-
-            target_machine->status = MachineStatus::lack_of_material;
+            target_task->processing_machine = target_machine->id;
             target_machine->working_task = target_task->id;
         }
-        else
-        {
-            AGV->target = _target_machine;
-            AGV->status = AGVStatus::transporting;
-            AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
-        }
+        AGV->target = _target_machine;
+        AGV->transport_target = _target_task;
+        AGV->status = AGVStatus::transporting;
+        AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][_target_machine] / AGV->speed;
+
         this->moving_AGVs.push(id);
     }
 
-    shared_ptr<Job> act_transport(AGVId id, TaskId _target_task, MachineId _target_machine)
+    shared_ptr<Job> act(Action action)
     {
         auto ret = this->copy();
-        ret->_act_transport(id, _target_task, _target_machine);
+        switch (action.type)
+        {
+        case ActionType::move:
+            ret->act_move(action.act_AGV, action.target_machine);
+            break;
+
+        case ActionType::pick:
+            ret->act_pick(action.act_AGV, action.target_machine);
+            break;
+
+        case ActionType::transport:
+            ret->act_transport(action.act_AGV, action.target_task.value(), action.target_machine);
+            break;
+
+        default:
+            unreachable();
+        }
         return ret;
     }
 
@@ -912,49 +1087,87 @@ public:
         }
         case AGVStatus::picking:
         {
-            auto target_machine = this->machines[AGV->target];
-            if (target_machine->id != this->dummy_machine_id)
+
+            if (AGV->target != this->dummy_machine_id)
             {
+                auto target_machine = this->machines[AGV->target];
                 assert(target_machine->status == MachineStatus::holding_product);
                 assert(target_machine->working_task.has_value());
-            }
 
-            auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
-            assert(transport_task->status == TaskStatus::need_transport);
+                auto transport_task = get<shared_ptr<Task>>(this->tasks[target_machine->working_task.value()]);
+                assert(transport_task->status == TaskStatus::waiting_transport);
+
+                if (transport_task->successor != this->end_task_id)
+                {
+                    auto target_task = get<shared_ptr<Task>>(this->tasks[transport_task->successor]);
+                    target_task->status = TaskStatus::waiting_machine;
+                }
+
+                target_machine->status = MachineStatus::idle;
+                target_machine->working_task = nullopt;
+
+                transport_task->status = TaskStatus::transporting;
+
+                AGV->loaded_item = transport_task->id;
+            }
+            else
+            {
+                AGV->loaded_item = this->begin_task_id;
+            }
 
             AGV->status = AGVStatus::idle;
             AGV->position = AGV->target;
-            AGV->loaded_item = transport_task->id;
-
-            target_machine->status = MachineStatus::idle;
-            target_machine->working_task = nullopt;
-
-            transport_task->status = TaskStatus::transporting;
 
             break;
         }
 
         case AGVStatus::transporting:
         {
-            auto target_machine = this->machines[AGV->target];
-            assert(target_machine->status == MachineStatus::lack_of_material);
+            assert(AGV->loaded_item.has_value() && AGV->transport_target.has_value());
+            if (AGV->loaded_item.value() != this->begin_task_id)
+            {
+                auto transport_task = get<shared_ptr<Task>>(this->tasks[AGV->loaded_item.value()]);
+                assert(transport_task->status == TaskStatus::transporting);
+                transport_task->status = TaskStatus::finished;
+            }
+            else
+            {
+                auto begin_task = get<shared_ptr<JobBegin>>(this->tasks[this->begin_task_id]);
+                begin_task->arrived_count++;
+                if (begin_task->arrived_count == begin_task->successors.size())
+                {
+                    begin_task->status = TaskStatus::finished;
+                }
+            }
 
-            auto transport_task = get<shared_ptr<Task>>(this->tasks[AGV->loaded_item.value()]);
-            assert(transport_task->status == TaskStatus::transporting);
+            if (AGV->target != this->dummy_machine_id)
+            {
+                auto target_machine = this->machines[AGV->target];
+                assert(target_machine->status == MachineStatus::lack_of_material);
+                target_machine->status = MachineStatus::working;
 
-            auto target_task = get<shared_ptr<Task>>(this->tasks[transport_task->successor]);
-            assert(target_task->status == TaskStatus::waiting);
-            assert(target_task->machine_type == target_machine->type);
+                auto target_task = get<shared_ptr<Task>>(this->tasks[AGV->transport_target.value()]);
+                assert(target_task->status == TaskStatus::waiting_material);
+                assert(target_task->machine_type == target_machine->type);
+                target_task->status = TaskStatus::processing;
+                target_task->finish_timestamp = this->timestamp + target_task->process_time;
+                this->processing_tasks.push(target_task->id);
+            }
+            else
+            {
+                auto end_task = get<shared_ptr<JobEnd>>(this->tasks[this->end_task_id]);
+                end_task->recive_cound++;
+                if (end_task->recive_cound == end_task->predecessors.size())
+                {
+                    end_task->status = TaskStatus::finished;
+                    this->machines[this->dummy_machine_id]->status = MachineStatus::idle;
+                }
+            }
 
             AGV->status = AGVStatus::idle;
+            AGV->position = AGV->target;
+            AGV->transport_target = nullopt;
             AGV->loaded_item = nullopt;
-
-            target_machine->status = MachineStatus::working;
-
-            transport_task->status = TaskStatus::finished;
-
-            target_task->status = TaskStatus::processing;
-            target_task->finish_timestamp = this->timestamp + target_task->process_time;
 
             break;
         }
@@ -979,6 +1192,8 @@ protected:
 
     ProcessingTaskQueue processing_tasks;
     MovingAGVQueue moving_AGVs;
+
+    optional<vector<Action>> available_actions;
 };
 
 struct JobFeatures
@@ -1071,7 +1286,8 @@ PYBIND11_MODULE(graph, m)
 {
     py::enum_<TaskStatus>(m, "TaskStatus")
         .value("blocked", TaskStatus::blocked)
-        .value("waiting", TaskStatus::waiting)
+        .value("waiting_machine", TaskStatus::waiting_machine)
+        .value("waiting_material", TaskStatus::waiting_material)
         .value("need_transport", TaskStatus::need_transport)
         .value("waiting_transport", TaskStatus::waiting_transport)
         .value("transporting", TaskStatus::transporting)
@@ -1081,6 +1297,15 @@ PYBIND11_MODULE(graph, m)
         .value("lack_of_material", MachineStatus::lack_of_material)
         .value("working", MachineStatus::working)
         .value("holding_product", MachineStatus::holding_product);
+    py::enum_<AGVStatus>(m, "AGVStatus")
+        .value("idle", AGVStatus::idle)
+        .value("moving", AGVStatus::moving)
+        .value("picking", AGVStatus::picking)
+        .value("transporting", AGVStatus::transporting);
+    py::enum_<ActionType>(m, "ActionType")
+        .value("move", ActionType::move)
+        .value("pick", ActionType::pick)
+        .value("transport", ActionType::transport);
 
     py::class_<JobBegin, shared_ptr<JobBegin>>(m, "JobBegin")
         .def("__repr__", &JobBegin::repr);
@@ -1094,6 +1319,17 @@ PYBIND11_MODULE(graph, m)
 
     py::class_<AGV, shared_ptr<AGV>>(m, "AGV")
         .def("__repr__", &AGV::repr);
+
+    py::class_<Action, shared_ptr<Action>>(m, "Action")
+        .def(py::init<ActionType, AGVId, MachineId, optional<TaskId>>(), "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_task"_a = nullopt)
+        .def_readwrite("action_type", &Action::type)
+        .def_readwrite("AGV_id", &Action::act_AGV)
+        .def_readwrite("target_machine", &Action::target_machine)
+        .def_readwrite("target_task", &Action::target_task)
+        .def("__repr__", [](const Action &self)
+             { string task_str = self.target_task.has_value() ? to_string(self.target_task.value()) : "none";
+                return format("<Action (type: {}, AGV_id: {}, target_machine: {}, target_task: {})>",
+                              enum_string(self.type), self.act_AGV, self.target_machine, task_str); });
 
     py::class_<Job, shared_ptr<Job>>(m, "Job")
         .def(py::init<>())
@@ -1109,11 +1345,12 @@ PYBIND11_MODULE(graph, m)
         .def("set_distance", py::overload_cast<map<MachineId, map<MachineId, double>> &>(&Job::set_distance), "data"_a)
         .def("set_rand_distance", &Job::set_rand_distance, "min_dist"_a, "max_dist"_a)
         .def_static("rand_generate", &Job::rand_generate, "task_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
-        .def("features", &Job::features)
+        .def("init_task_status", &Job::init_task_status)
         .def("copy", &Job::copy)
-        .def("act_move", &Job::act_move, "AGV_id"_a, "target_machine"_a)
-        .def("act_pick", &Job::act_pick, "AGV_id"_a, "target_machine"_a)
-        .def("act_transport", &Job::act_transport, "AGV_id"_a, "target_task"_a, "target_machine"_a)
+        .def("features", &Job::features)
+        .def("finished", &Job::finished)
+        .def("get_available_actions", &Job::get_available_actions)
+        .def("act", &Job::act, "action"_a)
         .def("wait", &Job::wait, "delta_time"_a)
         .def("__repr__", &Job::repr)
         .def_readonly_static("begin_task_id", &Job::begin_task_id)
