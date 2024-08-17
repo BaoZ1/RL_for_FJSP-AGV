@@ -16,3 +16,4 @@ binds/build
 binds/*.pyd
 binds/*.pyi
 **/*.old
+private

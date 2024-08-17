@@ -7,7 +7,7 @@ set(pybind11_DIR ${CMAKE_SOURCE_DIR}/pybind11/build/mock_install/share/cmake/pyb
 find_package(pybind11 CONFIG REQUIRED)
 find_package(Python 3.12 REQUIRED)
 
-pybind11_add_module(graph graph/graph.cpp)
+pybind11_add_module(graph graph/bind.cpp graph/graph.cpp)
 add_custom_command(
     TARGET graph
     POST_BUILD
@@ -15,11 +15,3 @@ add_custom_command(
             ${CMAKE_SOURCE_DIR}/build/$<CONFIG>/graph.cp312-win_amd64.pyd
             ${CMAKE_SOURCE_DIR}
 )
-
-# enable_testing()
-
-# add_executable(graph_test graph/test.cpp)
-
-# target_link_libraries(graph_test PRIVATE pybind11::module)
-
-# add_test(NAME GraphTests COMMAND graph_test)
