@@ -7,7 +7,7 @@
 #include <optional>
 #include <variant>
 
-#include "graph.h"
+#include "FJSP_graph.h"
 
 using namespace std;
 
@@ -17,25 +17,25 @@ using namespace std;
 #define DEBUG_OUT(...) std::cout << format(__VA_ARGS__) << std::endl
 #endif
 
-constexpr string enum_string(TaskStatus s)
+constexpr string enum_string(OperationStatus s)
 {
     switch (s)
     {
-    case TaskStatus::blocked:
+    case OperationStatus::blocked:
         return string("blocked");
-    case TaskStatus::waiting_machine:
+    case OperationStatus::waiting_machine:
         return string("waiting_machine");
-    case TaskStatus::waiting_material:
+    case OperationStatus::waiting_material:
         return string("waiting_material");
-    case TaskStatus::processing:
+    case OperationStatus::processing:
         return string("processing");
-    case TaskStatus::need_transport:
+    case OperationStatus::need_transport:
         return string("need_transport");
-    case TaskStatus::waiting_transport:
+    case OperationStatus::waiting_transport:
         return string("waiting_transport");
-    case TaskStatus::transporting:
+    case OperationStatus::transporting:
         return string("transporting");
-    case TaskStatus::finished:
+    case OperationStatus::finished:
         return string("finished");
     default:
         unreachable();
@@ -96,7 +96,7 @@ constexpr string enum_string(ActionType t)
     }
 }
 
-string id_set_string(const unordered_set<TaskId> &s)
+string id_set_string(const unordered_set<OperationId> &s)
 {
     stringstream ss;
     ss << "[";
@@ -155,10 +155,10 @@ string o2s(optional<T> o, string on_empty = "null")
 }
 
 template <typename... Types>
-    requires(derived_from<Types, TaskBase> && ...)
-shared_ptr<TaskBase> to_task_base_ptr(variant<shared_ptr<Types>...> wrapped)
+    requires(derived_from<Types, OperationBase> && ...)
+shared_ptr<OperationBase> to_operation_base_ptr(variant<shared_ptr<Types>...> wrapped)
 {
     return visit([](auto &&a)
-                 { return static_pointer_cast<TaskBase>(a); }, wrapped);
+                 { return static_pointer_cast<OperationBase>(a); }, wrapped);
 }
 

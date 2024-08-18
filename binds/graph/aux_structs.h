@@ -5,12 +5,12 @@
 
 using namespace std;
 
-using TaskId = size_t;
+using OperationId = size_t;
 using MachineId = size_t;
 using AGVId = size_t;
 using MachineType = size_t;
 
-enum class TaskStatus
+enum class OperationStatus
 {
     blocked,
     waiting_machine,
