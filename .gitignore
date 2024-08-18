@@ -17,3 +17,4 @@ binds/*.pyd
 binds/*.pyi
 **/*.old
 private
+**/__pycache__
