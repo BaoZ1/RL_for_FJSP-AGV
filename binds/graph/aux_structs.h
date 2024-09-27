@@ -5,6 +5,7 @@
 
 using namespace std;
 
+
 using OperationId = size_t;
 using MachineId = size_t;
 using AGVId = size_t;

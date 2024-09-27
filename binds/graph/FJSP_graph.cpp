@@ -116,16 +116,14 @@ AGV::AGV(AGVId id, float speed, MachineId init_pos) : id(id),
 
 string AGV::repr()
 {
-    string item_str = this->loaded_item.has_value() ? to_string(this->loaded_item.value()) : "none";
-
     switch (this->status)
     {
     case AGVStatus::idle:
         return format("<AGV (speed: {:.2f}, status: {}, position: {}, loaded_item: {})>",
-                      this->speed, enum_string(this->status), this->position, item_str);
+                      this->speed, enum_string(this->status), this->position, o2s(this->loaded_item));
     default:
         return format("<AGV (speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>",
-                      this->speed, enum_string(this->status), this->position, this->target, this->finish_timestamp, item_str);
+                      this->speed, enum_string(this->status), this->position, this->target, this->finish_timestamp, o2s(this->loaded_item));
     }
 }
 
@@ -326,14 +324,14 @@ string Graph::repr()
     ss << add_indent("     ");
     for (auto &&[id, _] : this->machines)
     {
-        ss << format("{:^5}", id);
+        ss << format("{:^6}", id);
     }
     for (auto &&[from, _] : this->machines)
     {
-        ss << format("\n{:^5}", from);
+        ss << format("\n{:^6}", from);
         for (auto &&[to, _] : this->machines)
         {
-            ss << format("{:^5.2f}", this->distances[from][to]);
+            ss << format("{:^6.2f}", this->distances[from][to]);
         }
     }
     ss << "\n>";
@@ -510,7 +508,7 @@ shared_ptr<GraphFeatures> Graph::features()
     ret->operation_features.resize(normal_operations.size());
     auto operations_with_idx = views::enumerate(normal_operations);
     map<OperationId, size_t> operation_id_idx_mapper;
-    for(auto [i, operation] : operations_with_idx)
+    for (auto [i, operation] : operations_with_idx)
     {
         ret->operation_features[i] = this->get_operation_feature(operation);
         operation_id_idx_mapper[operation->id] = static_cast<size_t>(i);
@@ -527,9 +525,9 @@ shared_ptr<GraphFeatures> Graph::features()
             id = get<shared_ptr<Operation>>(this->operations[id])->successor;
         }
     }
-    
+
     ret->machine_type.resize(normal_operations.size());
-    for(auto [idx, operation] : operations_with_idx)
+    for (auto [idx, operation] : operations_with_idx)
     {
         ret->machine_type[idx] = operation->machine_type;
     }
@@ -538,7 +536,7 @@ shared_ptr<GraphFeatures> Graph::features()
     auto machine_with_idx = views::enumerate(this->machines | views::values);
     map<MachineId, size_t> machine_id_idx_mapper;
     map<MachineType, vector<float>> machine_type_idx_mask;
-    for(auto [i, machine] : machine_with_idx)
+    for (auto [i, machine] : machine_with_idx)
     {
         ret->machine_features[i] = Graph::get_machine_feature(machine);
         machine_id_idx_mapper[machine->id] = static_cast<size_t>(i);
@@ -548,21 +546,21 @@ shared_ptr<GraphFeatures> Graph::features()
 
     ret->operation_relations.resize(normal_operations.size());
     ret->processable_machine_mask.resize(normal_operations.size());
-    for(auto [i, operation] : operations_with_idx)
+    for (auto [i, operation] : operations_with_idx)
     {
         int p = operation->predecessor == this->begin_operation_id
-                                 ? -1
-                                 : operation_id_idx_mapper[operation->predecessor];
+                    ? -1
+                    : operation_id_idx_mapper[operation->predecessor];
         int s = operation->successor == this->end_operation_id
-                                 ? -1
-                                 : operation_id_idx_mapper[operation->successor];
+                    ? -1
+                    : operation_id_idx_mapper[operation->successor];
         ret->operation_relations[i] = {p, s};
         ret->processable_machine_mask[i] = machine_type_idx_mask[operation->machine_type];
     }
 
     ret->AGV_features.resize(this->AGVs.size());
     auto AGV_with_idx = views::enumerate(this->AGVs | views::values);
-    for(auto [i, AGV] : AGV_with_idx)
+    for (auto [i, AGV] : AGV_with_idx)
     {
         ret->AGV_features[i] = Graph::get_AGV_feature(AGV);
     }
@@ -573,6 +571,78 @@ shared_ptr<GraphFeatures> Graph::features()
 bool Graph::finished()
 {
     return get<shared_ptr<GraphEnd>>(this->operations[this->end_operation_id])->status == OperationStatus::finished;
+}
+
+double Graph::finish_time_lower_bound()
+{
+    map<MachineType, float> remain_process_time;
+    float remain_transport_distance = 0.0f;
+
+    map<pair<MachineType, MachineType>, float> min_type_distance;
+    map<MachineType, size_t> type_count;
+    for (auto [fid, from] : this->machines)
+    {
+        for (auto [tid, to] : this->machines)
+        {
+            float distance = this->distances[fid][tid];
+            auto [iter, new_add] = min_type_distance.try_emplace({from->type, to->type}, distance);
+            if (!new_add)
+            {
+                iter->second = min(distance, iter->second);
+            }
+        }
+        type_count.try_emplace(from->type, 0).first->second++;
+    }
+    for (auto ptr : this->operations | views::values)
+    {
+        if (!holds_alternative<shared_ptr<Operation>>(ptr))
+        {
+            continue;
+        }
+        auto operation = get<shared_ptr<Operation>>(ptr);
+
+        auto [iter, _] = remain_process_time.try_emplace(operation->machine_type, 0.0f);
+        if (operation->status <= OperationStatus::waiting_material)
+        {
+            iter->second += operation->process_time;
+        }
+        else if (operation->status == OperationStatus::processing)
+        {
+            iter->second += operation->finish_timestamp - this->timestamp;
+        }
+
+        auto predecessor = to_operation_base_ptr(this->operations[operation->predecessor]);
+        if (operation->status <= OperationStatus::waiting_machine)
+        {
+            remain_transport_distance += min_type_distance[{predecessor->machine_type, operation->machine_type}];
+        }
+        else if (operation->status == OperationStatus::waiting_material)
+        {
+            for (auto AGV : this->AGVs | views::values)
+            {
+                if (AGV->status == AGVStatus::transporting && AGV->loaded_item.value() == predecessor->id)
+                {
+                    remain_transport_distance += (AGV->finish_timestamp - this->timestamp) * AGV->speed;
+                    break;
+                }
+            }
+        }
+    }
+
+    float max_time = 0;
+    for(auto [type, total_time] : remain_process_time)
+    {
+        max_time = max(max_time, total_time / type_count[type]);
+    }
+
+    float total_speed = 0;
+    for(auto AGV : this->AGVs | views::values)
+    {
+        total_speed += AGV->speed;
+    }
+    max_time = max(max_time, remain_transport_distance / total_speed);
+
+    return this->timestamp + max_time;
 }
 
 vector<Action> Graph::get_available_actions()

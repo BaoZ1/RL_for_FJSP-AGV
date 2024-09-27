@@ -144,6 +144,7 @@ public:
     shared_ptr<GraphFeatures> features();
 
     bool finished();
+    double finish_time_lower_bound();
 
     vector<Action> get_available_actions();
 
