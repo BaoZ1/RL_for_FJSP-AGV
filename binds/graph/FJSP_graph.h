@@ -2,7 +2,7 @@
 
 #include <string>
 #include <sstream>
-#include <unordered_set>
+#include <set>
 #include <optional>
 #include <variant>
 #include <map>
@@ -12,44 +12,29 @@
 
 using namespace std;
 
-struct OperationBase
+
+struct Product
 {
-    OperationBase(OperationId, MachineType);
-    virtual string repr() = 0;
+    OperationId from, to;
+    auto operator<=>(const Product& other) const = default;
+    string repr();
+};
+
+struct Operation
+{
+    Operation(OperationId, MachineType, float);
+    string repr();
 
     OperationId id;
     OperationStatus status;
     MachineType machine_type;
-};
-
-struct GraphBegin : public OperationBase
-{
-    GraphBegin(OperationId, MachineType);
-    string repr() override;
-
-    unordered_set<OperationId> successors;
-    size_t sent_count, arrived_count;
-};
-
-struct GraphEnd : public OperationBase
-{
-    GraphEnd(OperationId, MachineType);
-    string repr() override;
-
-    unordered_set<OperationId> predecessors;
-    size_t recive_cound;
-};
-
-struct Operation : public OperationBase
-{
-    Operation(OperationId, MachineType, float);
-    string repr() override;
-
     float process_time;
-    float finish_timestamp;
-    OperationId predecessor;
-    OperationId successor;
+
     optional<MachineId> processing_machine;
+    float finish_timestamp;
+
+    set<OperationId> predecessors, arrived_preds;
+    set<OperationId> successors, sent_succs;
 };
 
 struct Machine
@@ -60,7 +45,8 @@ struct Machine
     MachineId id;
     MachineType type;
     MachineStatus status;
-    optional<OperationId> working_operation;
+    optional<OperationId> working_operation, waiting_operation;
+    set<Product> materials, products;
 };
 
 struct AGV
@@ -71,22 +57,22 @@ struct AGV
     AGVId id;
     AGVStatus status;
     float speed;
-    MachineId position, target;
-    optional<OperationId> transport_target;
+    MachineId position, target_machine;
+    optional<Product> loaded_item, target_item;
     float finish_timestamp;
 
-    optional<OperationId> loaded_item;
 };
 
 struct Action
 {
-    Action(ActionType, AGVId, MachineId, optional<OperationId>);
+    Action(ActionType, AGVId, MachineId);
+    Action(ActionType, AGVId, MachineId, Product);
     string repr();
 
     ActionType type;
     AGVId act_AGV;
     MachineId target_machine;
-    optional<OperationId> target_operation;
+    optional<Product> target_product;
 };
 
 struct GraphFeatures;
@@ -94,7 +80,6 @@ struct GraphFeatures;
 class Graph
 {
 public:
-    using OperationNodePtr = variant<shared_ptr<GraphBegin>, shared_ptr<GraphEnd>, shared_ptr<Operation>>;
 
     using ProcessingOperationQueue = copyable_priority_queue<OperationId, function<bool(OperationId, OperationId)>>;
     using MovingAGVQueue = copyable_priority_queue<AGVId, function<bool(AGVId, AGVId)>>;
@@ -103,17 +88,20 @@ public:
     static const MachineId dummy_machine_id = 0;
     static const MachineType dummy_machine_type = 0;
 
-    static const size_t operation_feature_size = 10;
-    static const size_t machine_feature_size = 5;
+    static const size_t operation_feature_size = 8;
+    static const size_t machine_feature_size = 7;
     static const size_t AGV_feature_size = 5;
 
     Graph();
 
     Graph(const Graph &);
 
-    OperationId add_operation(MachineType, float, optional<OperationId>, optional<OperationId>);
+    OperationId add_operation(MachineType, float);
+    void add_relation(OperationId, OperationId);
+    void remove_relation(OperationId, OperationId);
+    OperationId insert_operation(MachineType, float, optional<OperationId>, optional<OperationId>);
     void remove_operation(OperationId);
-    OperationNodePtr get_operation(OperationId);
+    shared_ptr<Operation> get_operation(OperationId);
     bool contains(OperationId);
 
     MachineId add_machine(MachineType);
@@ -132,9 +120,9 @@ public:
     void set_rand_distance(float, float);
     float get_travel_time(MachineId, MachineId, AGVId);
 
-    static shared_ptr<Graph> rand_generate(vector<size_t>, size_t, size_t, size_t, float, float, float, float, float);
+    static shared_ptr<Graph> rand_generate(size_t, size_t, size_t, size_t, float, float, float, float, float);
 
-    void init_operation_status();
+    void init();
 
     shared_ptr<Graph> copy();
 
@@ -152,8 +140,8 @@ public:
     bool AGV_time_compare(AGVId, AGVId);
 
     void act_move(AGVId, MachineId);
-    void act_pick(AGVId, MachineId);
-    void act_transport(AGVId, OperationId, MachineId);
+    void act_pick(AGVId, MachineId, Product);
+    void act_transport(AGVId, MachineId);
     shared_ptr<Graph> act(Action);
 
     void wait_operation();
@@ -168,7 +156,7 @@ protected:
 
     float timestamp;
 
-    map<OperationId, OperationNodePtr> operations;
+    map<OperationId, shared_ptr<Operation>> operations;
     map<MachineId, shared_ptr<Machine>> machines;
     map<AGVId, shared_ptr<AGV>> AGVs;
 
@@ -183,8 +171,8 @@ protected:
 struct GraphFeatures
 {
     vector<RepeatedTuple<float, Graph::operation_feature_size>> operation_features;
-    vector<RepeatedTuple<int, 2>> operation_relations;
-    vector<size_t> job_index;
+    vector<vector<size_t>> predecessor_mask;
+    vector<vector<size_t>> successors_mask;
     vector<MachineType> machine_type;
     vector<RepeatedTuple<float, Graph::machine_feature_size>> machine_features;
     vector<vector<float>> processable_machine_mask;

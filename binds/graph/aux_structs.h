@@ -14,21 +14,21 @@ using MachineType = size_t;
 enum class OperationStatus
 {
     blocked,
-    waiting_machine,
-    waiting_material,
+    unscheduled,
+    waiting,
     processing,
-    need_transport,
-    waiting_transport,
-    transporting,
+    // need_transport,
+    // waiting_transport,
+    // transporting,
     finished
 };
 
 enum class MachineStatus
 {
     idle,
-    lack_of_material,
+    waiting_material,
     working,
-    holding_product,
+    // holding_product,
 };
 
 enum class AGVStatus
