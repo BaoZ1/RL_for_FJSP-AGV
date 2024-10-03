@@ -3,9 +3,11 @@
 #include <string>
 #include <ranges>
 #include <sstream>
-#include <unordered_set>
+#include <set>
 #include <optional>
 #include <variant>
+#include <type_traits>
+#include <concepts>
 
 #include "FJSP_graph.h"
 
@@ -23,26 +25,19 @@ constexpr string enum_string(OperationStatus s)
     {
     case OperationStatus::blocked:
         return string("blocked");
-    case OperationStatus::waiting_machine:
-        return string("waiting_machine");
-    case OperationStatus::waiting_material:
-        return string("waiting_material");
+    case OperationStatus::unscheduled:
+        return string("unscheduled");
+    case OperationStatus::waiting:
+        return string("waiting");
     case OperationStatus::processing:
         return string("processing");
-    case OperationStatus::need_transport:
-        return string("need_transport");
-    case OperationStatus::waiting_transport:
-        return string("waiting_transport");
-    case OperationStatus::transporting:
-        return string("transporting");
     case OperationStatus::finished:
         return string("finished");
     default:
-        unreachable();
+        assert(false);
+        return string("unknown");
     }
 }
-
-
 
 constexpr string enum_string(MachineStatus s)
 {
@@ -50,17 +45,14 @@ constexpr string enum_string(MachineStatus s)
     {
     case MachineStatus::idle:
         return string("idle");
-    case MachineStatus::lack_of_material:
-        return string("lack_of_material");
+    case MachineStatus::waiting_material:
+        return string("waiting_material");
     case MachineStatus::working:
         return string("working");
-    case MachineStatus::holding_product:
-        return string("holding_product");
     default:
         unreachable();
     }
 }
-
 
 constexpr string enum_string(AGVStatus s)
 {
@@ -79,8 +71,6 @@ constexpr string enum_string(AGVStatus s)
     }
 }
 
-
-
 constexpr string enum_string(ActionType t)
 {
     switch (t)
@@ -96,7 +86,7 @@ constexpr string enum_string(ActionType t)
     }
 }
 
-string id_set_string(const unordered_set<OperationId> &s)
+string id_set_string(const set<OperationId> &s)
 {
     stringstream ss;
     ss << "[";
@@ -154,11 +144,44 @@ string o2s(optional<T> o, string on_empty = "null")
     return on_empty;
 }
 
-template <typename... Types>
-    requires(derived_from<Types, OperationBase> && ...)
-shared_ptr<OperationBase> to_operation_base_ptr(variant<shared_ptr<Types>...> wrapped)
+template <typename T>
+concept reprable = requires(T x) {
+    { x.repr() } -> same_as<string>;
+};
+
+template <reprable T>
+string o2s(optional<T> o, string on_empty = "null")
 {
-    return visit([](auto &&a)
-                 { return static_pointer_cast<OperationBase>(a); }, wrapped);
+    if (o.has_value())
+    {
+        return o->repr();
+    }
+    return on_empty;
 }
 
+template <class Container>
+concept iterable_container = requires(Container x) {
+    { x.begin() } -> input_or_output_iterator;
+    { x.end() } -> same_as<decltype(x.begin())>;
+    { *(x.end()) } -> same_as<decltype(*(x.begin()))>;
+};
+
+template <iterable_container Container, typename T = remove_cvref_t<decltype(*declval<Container>().begin())>>
+vector<T> random_unique(const Container &data, size_t num)
+{
+    vector<T> cp(data.begin(), data.end());
+    auto begin = cp.begin();
+    auto end = cp.end();
+    size_t left = distance(begin, end);
+    assert(left >= num);
+    for(size_t i = 0; i < num; i++)
+    {
+        auto r = begin;
+        advance(r, rand() % left);
+        swap(*begin, *r);
+        ++begin;
+        --left;
+    }
+    cp.resize(num);
+    return cp;
+}
