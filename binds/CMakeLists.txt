@@ -8,10 +8,10 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(Python 3.12 REQUIRED)
 
 pybind11_add_module(graph graph/bind.cpp graph/FJSP_graph.cpp)
-add_custom_command(
-    TARGET graph
-    POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-            ${CMAKE_SOURCE_DIR}/build/$<CONFIG>/graph.cp312-win_amd64.pyd
-            ${CMAKE_SOURCE_DIR}
-)
+# add_custom_command(
+#     TARGET graph
+#     POST_BUILD
+#     COMMAND ${CMAKE_COMMAND} -E copy
+#             ${CMAKE_SOURCE_DIR}/build/$<CONFIG>/graph.cp312-win_amd64.pyd
+#             ${CMAKE_SOURCE_DIR}
+# )

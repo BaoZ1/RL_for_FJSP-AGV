@@ -3,7 +3,6 @@ from torch import Tensor, tensor, nn
 from torch.nn import functional as F
 import einops
 
-
 class SelfAttention(nn.Module):
     def __init__(self, dim: int, hidden_dim: int | None = None):
         super().__init__()

@@ -1,5 +1,12 @@
 Push-Location (Split-Path -Parent $PSCommandPath)
 
+Push-Location model
+
+Get-ChildItem -Filter *.pyd | Remove-Item
+Get-ChildItem -Filter *.pyi | Remove-Item
+
+Pop-Location
+
 Push-Location binds
 
 if (-Not (Test-Path pybind11\build)) {
@@ -12,9 +19,6 @@ if (-Not (Test-Path pybind11\build)) {
     Pop-Location
 }
 
-Get-ChildItem -Filter *.pyd | Remove-Item
-Get-ChildItem -Filter *.pyi | Remove-Item
-
 if (Test-Path build) {
     Remove-Item build\* -Recurse -Force
 }
@@ -26,14 +30,19 @@ Push-Location build
 
 cmake ..
 
-if ($args.Count -eq 0) {
-    cmake --build . --config Release
+$config = "Release"
+
+if ($args.Count -ne 0) {
+    $config = $args[0]
 }
-else {
-    cmake --build . --config $args[0]
-}
+cmake --build . --config $config
 
 Pop-Location
+Pop-Location
+
+Move-Item "binds/build/$($config)/graph.cp312-win_amd64.pyd" "model/graph.cp312-win_amd64.pyd"
+
+Push-Location model
 
 $stubgenCmd = "stubgen "
 foreach ($file in (Get-ChildItem -Filter *.pyd)) {

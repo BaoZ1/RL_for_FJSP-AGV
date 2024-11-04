@@ -90,14 +90,14 @@ string AGV::repr()
     switch (this->status)
     {
     case AGVStatus::idle:
-        return format("<AGV (speed: {:.2f}, status: {}, position: {}, loaded_item: {})>",
-                      this->speed, enum_string(this->status), this->position, o2s(this->loaded_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, position: {}, loaded_item: {})>",
+                      this->id, this->speed, enum_string(this->status), this->position, o2s(this->loaded_item));
     case AGVStatus::picking:
-        return format("<AGV (speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, target_item: {})>",
-                      this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->target_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, target_item: {})>",
+                      this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->target_item));
     default:
-        return format("<AGV (speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>",
-                      this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->loaded_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>",
+                      this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->loaded_item));
     }
 }
 
@@ -125,7 +125,8 @@ string Action::repr()
     }
 }
 
-Graph::Graph() : timestamp(0),
+Graph::Graph() : inited(false),
+                 timestamp(0),
                  processing_operations(ProcessingOperationQueue(bind(&Graph::operation_time_compare, this, ph::_1, ph::_2))),
                  moving_AGVs(MovingAGVQueue(bind(&Graph::AGV_time_compare, this, ph::_1, ph::_2))),
                  available_actions(nullopt)
@@ -164,6 +165,7 @@ Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueu
 
     this->distances = other.distances;
 
+    this->inited = other.inited;
     this->timestamp = other.timestamp;
 
     this->processing_operations.set_data(other.processing_operations.get_data());
@@ -488,6 +490,7 @@ void Graph::init()
         dummy_machine->products.emplace(Product{this->begin_operation_id, id});
     }
     this->operations[this->end_operation_id]->status = OperationStatus::blocked;
+    this->inited = true;
 }
 
 shared_ptr<Graph> Graph::copy()
@@ -565,9 +568,11 @@ RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<
             rest_act_time};
 }
 
-shared_ptr<GraphFeatures> Graph::features()
+shared_ptr<GraphFeature> Graph::features()
 {
-    auto ret = make_shared<GraphFeatures>();
+    assert(this->inited);
+
+    auto ret = make_shared<GraphFeature>();
 
     ret->operation_features.resize(this->operations.size());
     auto operations_with_idx = this->operations | views::values | views::enumerate;
@@ -578,12 +583,6 @@ shared_ptr<GraphFeatures> Graph::features()
         operation_id_idx_mapper[operation->id] = static_cast<size_t>(i);
     }
 
-    ret->machine_type.resize(this->operations.size());
-    for (auto [idx, operation] : operations_with_idx)
-    {
-        ret->machine_type[idx] = operation->machine_type;
-    }
-
     ret->machine_features.resize(this->machines.size());
     auto machine_with_idx = this->machines | views::values | views::enumerate;
     map<MachineId, size_t> machine_id_idx_mapper;
@@ -592,32 +591,36 @@ shared_ptr<GraphFeatures> Graph::features()
     {
         ret->machine_features[i] = Graph::get_machine_feature(machine);
         machine_id_idx_mapper[machine->id] = static_cast<size_t>(i);
-        auto [iter, _] = machine_type_idx_mask.try_emplace(machine->type, vector<float>(this->machines.size(), 0));
-        iter->second[i] = 1;
+
+        if(machine->working_operation.has_value())
+        {
+            auto operation = this->operations[machine->working_operation.value()];
+            ret->processing.emplace_back(i, operation_id_idx_mapper[operation->id], operation->finish_timestamp - this->timestamp);
+        }
+        if (machine->waiting_operation.has_value())
+        {
+            auto operation = this->operations[machine->waiting_operation.value()];
+            ret->waiting.emplace_back(i, operation_id_idx_mapper[machine->waiting_operation.value()], operation->predecessors.size(), operation->arrived_preds.size());
+        }
     }
 
-    ret->predecessor_mask.resize(this->operations.size());
-    for (auto &&line : ret->predecessor_mask)
-    {
-        line.resize(this->operations.size());
-    }
-    ret->successors_mask.resize(this->operations.size());
-    for (auto &&line : ret->successors_mask)
-    {
-        line.resize(this->operations.size());
-    }
-    ret->processable_machine_mask.resize(operations.size());
     for (auto [i, operation] : operations_with_idx)
     {
         for (auto p_id : operation->predecessors)
         {
-            ret->predecessor_mask[i][operation_id_idx_mapper[p_id]] = 1;
+            ret->predecessor_idx.emplace_back(i, operation_id_idx_mapper[p_id]);
         }
         for (auto s_id : operation->successors)
         {
-            ret->successors_mask[i][operation_id_idx_mapper[s_id]] = 1;
+            ret->successor_idx.emplace_back(i, operation_id_idx_mapper[s_id]);
         }
-        ret->processable_machine_mask[i] = machine_type_idx_mask[operation->machine_type];
+        for (auto [m_id, m] : machine_with_idx)
+        {
+            if (m->type == operation->machine_type)
+            {
+                ret->processable_idx.emplace_back(m_id, i);
+            }
+        }
     }
 
     ret->AGV_features.resize(this->AGVs.size());
@@ -625,6 +628,20 @@ shared_ptr<GraphFeatures> Graph::features()
     for (auto [i, AGV] : AGV_with_idx)
     {
         ret->AGV_features[i] = Graph::get_AGV_feature(AGV);
+        if (AGV->status == AGVStatus::idle)
+        {
+            ret->AGV_position.emplace_back(i, machine_id_idx_mapper[AGV->position]);
+        }
+        else
+        {
+            auto t = AGV->finish_timestamp - this->timestamp;
+            ret->AGV_target.emplace_back(i, machine_id_idx_mapper[AGV->target_machine], t);
+        }
+        if (AGV->loaded_item.has_value())
+        {
+            auto p = AGV->loaded_item.value();
+            ret->AGV_loaded.emplace_back(i, operation_id_idx_mapper[p.from], operation_id_idx_mapper[p.to]);
+        }
     }
 
     return ret;
@@ -706,6 +723,8 @@ double Graph::finish_time_lower_bound()
 
 vector<Action> Graph::get_available_actions()
 {
+    assert(this->inited);
+
     if (this->available_actions.has_value())
     {
         return this->available_actions.value();
@@ -728,7 +747,7 @@ vector<Action> Graph::get_available_actions()
                 if (ranges::none_of(this->AGVs | views::values, [product](auto AGV)
                                     { return AGV->target_item == product; }))
                 {
-                    pickable_products.emplace_back(make_pair(machine, product));
+                    pickable_products.emplace_back(machine, product);
                 }
             }
         }
@@ -746,7 +765,7 @@ vector<Action> Graph::get_available_actions()
             if (operation->processing_machine.has_value())
             {
                 auto machine = this->machines[operation->processing_machine.value()];
-                assert(operation->status == OperationStatus::waiting);
+                assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
                 assert(operation->machine_type == machine->type);
                 ret.emplace_back(ActionType::transport, AGV_id, machine->id);
             }
@@ -828,28 +847,35 @@ void Graph::act_transport(AGVId id, MachineId target)
     auto target_operation = this->operations[product.to];
     assert(target_operation->predecessors.contains(AGV->loaded_item->from));
     assert(target_operation->machine_type == target_machine->type);
-    if (target_machine->status == MachineStatus::idle)
-    {
-        assert(!target_machine->waiting_operation.has_value());
-        assert(target_operation->status == OperationStatus::unscheduled);
-        target_machine->status = MachineStatus::waiting_material;
-        target_machine->waiting_operation = target_operation->id;
-    }
-    else
-    {
-        assert(target_machine->status == MachineStatus::waiting_material || target_machine->status == MachineStatus::working);
-        assert(target_machine->waiting_operation == target_operation->id);
-    }
 
-    if (target_operation->status == OperationStatus::unscheduled)
+    if (target_machine->waiting_operation.has_value())
     {
-        target_operation->status = OperationStatus::waiting;
-        target_operation->processing_machine = target_machine->id;
+        if(target_machine->working_operation.has_value())
+        {
+            assert(target_machine->status == MachineStatus::working);
+        }
+        else
+        {
+            assert(target_machine->status == MachineStatus::waiting_material);
+        }
+        assert(target_machine->waiting_operation == target_operation->id);
+        assert(target_operation->status <= OperationStatus::waiting);
+        assert(target_operation->processing_machine == target_machine->id);
     }
     else
     {
-        assert(target_operation->status == OperationStatus::waiting);
-        assert(target_operation->processing_machine == target_machine->id);
+        assert(target_operation->status <= OperationStatus::unscheduled);
+        assert(!target_operation->processing_machine.has_value());
+        if (target_machine->status == MachineStatus::idle)
+        {
+            target_machine->status = MachineStatus::waiting_material;
+        }
+        target_machine->waiting_operation = target_operation->id;
+        if (target_operation->status == OperationStatus::unscheduled)
+        {
+            target_operation->status = OperationStatus::waiting;
+        }
+        target_operation->processing_machine = target_machine->id;
     }
 
     AGV->target_machine = target;
@@ -861,6 +887,8 @@ void Graph::act_transport(AGVId id, MachineId target)
 
 shared_ptr<Graph> Graph::act(Action action)
 {
+    assert(this->inited);
+
     auto ret = this->copy();
     switch (action.type)
     {
@@ -902,15 +930,24 @@ void Graph::wait_operation()
         if (ranges::all_of(successor->predecessors, [this](auto p_id)
                            { return this->operations[p_id]->status == OperationStatus::finished; }))
         {
-            successor->status = OperationStatus::unscheduled;
+            if (successor->processing_machine.has_value())
+            {
+                successor->status = OperationStatus::waiting;
+            }
+            else
+            {
+                successor->status = OperationStatus::unscheduled;
+            }
         }
     }
 
     if (machine->waiting_operation.has_value())
     {
+        machine->status = MachineStatus::waiting_material;
         auto operation = this->operations[machine->waiting_operation.value()];
-        if (ranges::all_of(operation->predecessors, [machine](auto id)
-                           { return machine->materials.contains(Product{id, machine->waiting_operation.value()}); }))
+        assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
+        if (operation->status == OperationStatus::waiting && ranges::all_of(operation->predecessors, [machine](auto id)
+                                                                            { return machine->materials.contains(Product{id, machine->waiting_operation.value()}); }))
         {
             for (auto p_id : operation->predecessors)
             {
@@ -920,6 +957,8 @@ void Graph::wait_operation()
             machine->waiting_operation = nullopt;
             machine->status = MachineStatus::working;
             operation->status = OperationStatus::processing;
+            operation->finish_timestamp = this->timestamp + operation->process_time;
+            this->processing_operations.push(operation->id);
         }
     }
 }
@@ -966,9 +1005,9 @@ void Graph::wait_AGV()
         assert(AGV->loaded_item.has_value());
         auto machine = this->machines[AGV->target_machine];
         assert(machine->waiting_operation == AGV->loaded_item->to);
-        assert(machine->status == MachineStatus::waiting_material);
+        assert(machine->status == MachineStatus::waiting_material || machine->status == MachineStatus::working);
         auto operation = this->operations[AGV->loaded_item->to];
-        assert(operation->status == OperationStatus::waiting);
+        assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
         assert(operation->machine_type == machine->type);
         assert(operation->predecessors.contains(AGV->loaded_item->from));
         assert(!operation->arrived_preds.contains(AGV->loaded_item->from));
@@ -978,7 +1017,10 @@ void Graph::wait_AGV()
         machine->materials.emplace(AGV->loaded_item.value());
         operation->arrived_preds.emplace(AGV->loaded_item->from);
         AGV->loaded_item = nullopt;
-        if (operation->arrived_preds.size() == operation->predecessors.size())
+        bool processable = operation->arrived_preds.size() == operation->predecessors.size();
+        processable &= machine->status == MachineStatus::waiting_material;
+        processable &= operation->status == OperationStatus::waiting;
+        if (processable)
         {
             for (auto p_id : operation->arrived_preds)
             {
