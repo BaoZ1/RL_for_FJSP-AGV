@@ -13,8 +13,8 @@ CMakeUserPresets.json
 .vscode
 test.*
 binds/build
-binds/*.pyd
-binds/*.pyi
+**/*.pyd
+**/*.pyi
 **/*.old
 private
 **/__pycache__

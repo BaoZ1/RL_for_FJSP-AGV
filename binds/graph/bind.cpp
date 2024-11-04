@@ -78,12 +78,16 @@ PYBIND11_MODULE(graph, m)
         .def_readonly_static("machine_feature_size", &Graph::machine_feature_size)
         .def_readonly_static("AGV_feature_size", &Graph::AGV_feature_size);
 
-    py::class_<GraphFeatures, shared_ptr<GraphFeatures>>(m, "GraphFeatures")
-        .def_readonly("operation_features", &GraphFeatures::operation_features)
-        .def_readonly("predecessor_mask", &GraphFeatures::predecessor_mask)
-        .def_readonly("successors_mask", &GraphFeatures::successors_mask)
-        .def_readonly("machine_type", &GraphFeatures::machine_type)
-        .def_readonly("machine_features", &GraphFeatures::machine_features)
-        .def_readonly("processable_machine_mask", &GraphFeatures::processable_machine_mask)
-        .def_readonly("AGV_features", &GraphFeatures::AGV_features);
+    py::class_<GraphFeature, shared_ptr<GraphFeature>>(m, "GraphFeature")
+        .def_readonly("operation_features", &GraphFeature::operation_features)
+        .def_readonly("predecessor_idx", &GraphFeature::predecessor_idx)
+        .def_readonly("successor_idx", &GraphFeature::successor_idx)
+        .def_readonly("machine_features", &GraphFeature::machine_features)
+        .def_readonly("processable_idx", &GraphFeature::processable_idx)
+        .def_readonly("processing", &GraphFeature::processing)
+        .def_readonly("waiting", &GraphFeature::waiting)
+        .def_readonly("AGV_features", &GraphFeature::AGV_features)
+        .def_readonly("AGV_position", &GraphFeature::AGV_position)
+        .def_readonly("AGV_target", &GraphFeature::AGV_target)
+        .def_readonly("AGV_loaded", &GraphFeature::AGV_loaded);
 }

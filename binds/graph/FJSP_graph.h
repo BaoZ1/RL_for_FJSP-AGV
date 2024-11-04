@@ -12,11 +12,10 @@
 
 using namespace std;
 
-
 struct Product
 {
     OperationId from, to;
-    auto operator<=>(const Product& other) const = default;
+    auto operator<=>(const Product &other) const = default;
     string repr();
 };
 
@@ -60,7 +59,6 @@ struct AGV
     MachineId position, target_machine;
     optional<Product> loaded_item, target_item;
     float finish_timestamp;
-
 };
 
 struct Action
@@ -75,12 +73,11 @@ struct Action
     optional<Product> target_product;
 };
 
-struct GraphFeatures;
+struct GraphFeature;
 
 class Graph
 {
 public:
-
     using ProcessingOperationQueue = copyable_priority_queue<OperationId, function<bool(OperationId, OperationId)>>;
     using MovingAGVQueue = copyable_priority_queue<AGVId, function<bool(AGVId, AGVId)>>;
 
@@ -129,7 +126,7 @@ public:
     RepeatedTuple<float, operation_feature_size> get_operation_feature(shared_ptr<Operation>);
     RepeatedTuple<float, machine_feature_size> get_machine_feature(shared_ptr<Machine>);
     RepeatedTuple<float, AGV_feature_size> get_AGV_feature(shared_ptr<AGV>);
-    shared_ptr<GraphFeatures> features();
+    shared_ptr<GraphFeature> features();
 
     bool finished();
     double finish_time_lower_bound();
@@ -154,6 +151,7 @@ protected:
     MachineId next_machine_id;
     AGVId next_AGV_id;
 
+    bool inited;
     float timestamp;
 
     map<OperationId, shared_ptr<Operation>> operations;
@@ -168,13 +166,17 @@ protected:
     optional<vector<Action>> available_actions;
 };
 
-struct GraphFeatures
+struct GraphFeature
 {
     vector<RepeatedTuple<float, Graph::operation_feature_size>> operation_features;
-    vector<vector<size_t>> predecessor_mask;
-    vector<vector<size_t>> successors_mask;
-    vector<MachineType> machine_type;
+    vector<tuple<size_t, size_t>> predecessor_idx; // predecessor_idx, successor_idx;
+    vector<tuple<size_t, size_t>> successor_idx;   // successor_idx, predecessor_idx
     vector<RepeatedTuple<float, Graph::machine_feature_size>> machine_features;
-    vector<vector<float>> processable_machine_mask;
+    vector<tuple<size_t, size_t>> processable_idx; // machine_idx, operation_idx
+    vector<tuple<size_t, size_t, float>> processing;  // machine_idx, operation_idx, rest_time
+    vector<tuple<size_t, size_t, size_t, size_t>> waiting;     // machine_idx, operation_idx, total, current
     vector<RepeatedTuple<float, Graph::AGV_feature_size>> AGV_features;
+    vector<tuple<size_t, size_t>> AGV_position;       // AGV_idx, machine_idx
+    vector<tuple<size_t, size_t, float>> AGV_target;  // AGV_idx, machine_idx, rest_time
+    vector<tuple<size_t, size_t, size_t>> AGV_loaded; // AGV_idx, from_operation_idx, to_operation_idx
 };
