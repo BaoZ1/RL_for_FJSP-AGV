@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from torch_geometric.data import HeteroData
+from torch_geometric.utils import to_undirected
 from .graph import GraphFeature
 
 
