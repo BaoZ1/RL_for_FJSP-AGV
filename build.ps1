@@ -1,55 +1,83 @@
-Push-Location (Split-Path -Parent $PSCommandPath)
+[CmdletBinding()]
+param (
+    [Parameter()]
+    [ValidateSet("bind", "backend", "frontend", "all")]
+    $target="all",
 
-Push-Location model
+    [Parameter()]
+    [ValidateSet("Debug", "Release")]
+    $mode="Debug"
+)
 
-Get-ChildItem -Filter *.pyd | Remove-Item
-Get-ChildItem -Filter *.pyi | Remove-Item
+$root = Split-Path -Parent $PSCommandPath
 
-Pop-Location
+function BuildBind {
+    Set-Location "$($root)/binds/pybind11"
 
-Push-Location binds
+    if (-Not (Test-Path build)) {
+        New-Item build -ItemType "directory"
+        Set-Location build
+        cmake ..
+        cmake --build . --config Release --target check
+    }
 
-if (-Not (Test-Path pybind11\build)) {
-    Push-Location pybind11
-    mkdir build
-    Push-Location build
+    Set-Location "$($root)/binds"
+
+    if (-Not (Test-Path build)) {
+        New-Item build -ItemType "directory"
+    }
+
+    Set-Location build
+
     cmake ..
-    cmake --build . --config Release --target check
-    Pop-Location
-    Pop-Location
+
+    $config = (Get-Culture).TextInfo.ToTitleCase($mode)
+
+    cmake --build . --config $config
+
+    Set-Location "$($root)/model"
+
+    Move-Item "$($root)/binds/build/$($config)/graph.cp312-win_amd64.pyd" graph.cp312-win_amd64.pyd -Force
+
+    $stubgenCmd = "stubgen "
+    foreach ($file in (Get-ChildItem -Filter *.pyd)) {
+        $stubgenCmd = $stubgenCmd + "-m $($file.Name.Split('.')[0]) "
+    }
+    $stubgenCmd = $stubgenCmd + "-o ."
+
+    Invoke-Expression $stubgenCmd
 }
 
-if (Test-Path build) {
-    Remove-Item build\* -Recurse -Force
+function BuildBackend {
+    Set-Location "$($root)/backend"
+
+    pyinstaller main.py --noconfirm
+
+    Set-Location $root
+
+    $prefix = rustc -Vv | Select-String "host:" | ForEach-Object {$_.Line.split(" ")[1]}
+
+    Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/backend-$($prefix).exe" -Force
 }
-else {
-    mkdir build
+
+function BuildFrontend {
+    Push-Location "$($root)/frontend"
+
+    if (-Not (Test-Path node_modules)) {
+        npm install
+    }
+
+    npm run tauri build
 }
 
-Push-Location build
-
-cmake ..
-
-$config = "Release"
-
-if ($args.Count -ne 0) {
-    $config = $args[0]
+try {
+    switch ($target) {
+        "bind" { BuildBind }
+        "backend" { BuildBackend }
+        "frontend" { BuildFrontend }
+        "all" { BuildBind; BuildBackend; BuildFrontend }
+    }
 }
-cmake --build . --config $config
-
-Pop-Location
-Pop-Location
-
-Move-Item "binds/build/$($config)/graph.cp312-win_amd64.pyd" "model/graph.cp312-win_amd64.pyd"
-
-Push-Location model
-
-$stubgenCmd = "stubgen "
-foreach ($file in (Get-ChildItem -Filter *.pyd)) {
-    $stubgenCmd = $stubgenCmd + "-m $($file.Name.Split('.')[0]) "
+finally {
+    Set-Location $root
 }
-$stubgenCmd = $stubgenCmd + "-o ."
-
-Invoke-Expression $stubgenCmd
-
-Pop-Location
