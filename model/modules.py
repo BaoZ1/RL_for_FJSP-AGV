@@ -1,6 +1,6 @@
 import torch
 from torch import nn, Tensor, tensor
-from torch_geometric.data import HeteroData
+from torch_geometric.data import HeteroData, Batch
 from torch_geometric import nn as gnn
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
@@ -176,13 +176,13 @@ class ExtractLayer(nn.Module):
 
         for k, v in f1.items():
             if k in res:
-                res[k] += v
+                res[k] = res[k] + v
             else:
                 res[k] = v
 
         for k, v in f2.items():
             if k in res:
-                res[k] += v
+                res[k] = res[k] + v
             else:
                 res[k] = v
 
@@ -223,12 +223,8 @@ class Mixer(nn.Module):
         )
 
     def forward(
-        self, x_dict: dict[NodeType, Tensor], batch_dict: dict[NodeType, Tensor] | None
+        self, x_dict: dict[NodeType, Tensor], batch_dict: dict[NodeType, Tensor]
     ):
-        if batch_dict is None:
-            for k, v in x_dict.items():
-                batch_dict[k] = torch.zeros(v.size(0), device=v.device)
-
         edge_index_dict: dict[EdgeType, Tensor] = {}
 
         for k, batch in batch_dict.items():
@@ -245,10 +241,15 @@ class Mixer(nn.Module):
 
         graph_feature = self.graph_mix(
             torch.cat(
-                [global_dict["operation"], global_dict["machine"], global_dict["AGV"]],
-                1
+                [
+                    global_dict[f"{name}_global"]
+                    for name in ["operation", "machine", "AGV"]
+                ],
+                1,
             )
         )
+        
+        return global_dict, graph_feature
 
 
 class Model(nn.Module):
@@ -259,6 +260,8 @@ class Model(nn.Module):
         machine_hidden_channels: int,
         AGV_hidden_channels: int,
         extract_num_layers: int,
+        global_channels: tuple[int, int, int],
+        graph_global_channels: int,
     ):
         super().__init__()
 
@@ -287,16 +290,31 @@ class Model(nn.Module):
             ]
         )
 
-        self.mix = ...
+        self.mix = Mixer(
+            (
+                operation_hidden_channels,
+                machine_hidden_channels,
+                AGV_hidden_channels,
+            ),
+            global_channels,
+            graph_global_channels,
+        )
 
-    def forward(
-        self,
-        x_dict: dict[NodeType, Tensor],
-        edge_index_dict: dict[EdgeType, Tensor],
-        edge_attr_dict: dict[EdgeType, Tensor] | None = None,
-    ):
+    def forward(self, data: HeteroData | Batch):
+        x_dict = data.x_dict
+        edge_index_dict = data.edge_index_dict
+        edge_attr_dict = data.edge_attr_dict
+        if isinstance(data, Batch):
+            batch_dict = {k: data[k].batch for k in x_dict}
+        else:
+            batch_dict = None
+
         for k, v in x_dict.items():
             x_dict[k] = self.init_project[k](v)
 
         for layer in self.backbone:
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
+
+        global_dict, graph_feature = self.mix(x_dict, batch_dict)
+        
+        return x_dict, global_dict, graph_feature
