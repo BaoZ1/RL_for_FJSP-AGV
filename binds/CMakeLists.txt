@@ -7,11 +7,4 @@ set(pybind11_DIR ${CMAKE_SOURCE_DIR}/pybind11/build/mock_install/share/cmake/pyb
 find_package(pybind11 CONFIG REQUIRED)
 find_package(Python 3.12 REQUIRED)
 
-pybind11_add_module(graph graph/bind.cpp graph/FJSP_graph.cpp)
-# add_custom_command(
-#     TARGET graph
-#     POST_BUILD
-#     COMMAND ${CMAKE_COMMAND} -E copy
-#             ${CMAKE_SOURCE_DIR}/build/$<CONFIG>/graph.cp312-win_amd64.pyd
-#             ${CMAKE_SOURCE_DIR}
-# )
+pybind11_add_module(FJSP_env FJSP_env/bind.cpp FJSP_env/FJSP_env.cpp)
