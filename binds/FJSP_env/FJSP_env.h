@@ -95,8 +95,8 @@ public:
 
     Graph(const Graph &);
 
-    static py::tuple get_state(const Graph&);
-    static shared_ptr<Graph> set_state(py::tuple);
+    py::dict get_state();
+    static shared_ptr<Graph> from_state(py::dict);
 
     OperationId add_operation(MachineType, float);
     void add_relation(OperationId, OperationId);

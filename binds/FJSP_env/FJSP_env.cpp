@@ -26,6 +26,7 @@
 using namespace std;
 namespace py = pybind11;
 namespace ph = placeholders;
+using namespace py::literals;
 
 string Product::repr()
 {
@@ -172,17 +173,162 @@ Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueu
     this->moving_AGVs.set_data(other.moving_AGVs.get_data());
 }
 
-py::tuple Graph::get_state(const Graph &g)
+py::dict Graph::get_state()
 {
-    auto res = py::tuple(1);
-    res[0] = g.timestamp;
-    return res;
+    vector<py::dict> operation_dict;
+    for (auto operation : this->operations | views::values)
+    {
+        operation_dict.emplace_back(
+            "id"_a = operation->id,
+            "status"_a = static_cast<int>(operation->status),
+            "machine_type"_a = operation->machine_type,
+            "process_time"_a = operation->process_time,
+            "processing_machine"_a = operation->processing_machine,
+            "finish_timestamp"_a = operation->finish_timestamp,
+            "predecessors"_a = vector<OperationId>(from_range, operation->predecessors),
+            "arrived_preds"_a = vector<OperationId>(from_range, operation->arrived_preds),
+            "successors"_a = vector<OperationId>(from_range, operation->successors),
+            "sent_succs"_a = vector<OperationId>(from_range, operation->sent_succs));
+    }
+    vector<py::dict> machine_dict;
+    for (auto machine : this->machines | views::values)
+    {
+        auto materials = ranges::to<vector<py::dict>>(
+            machine->materials |
+            views::transform(
+                [](Product p)
+                { return py::dict("from"_a = p.from, "to"_a = p.to); }));
+        auto products = ranges::to<vector<py::dict>>(
+            machine->products |
+            views::transform(
+                [](Product p)
+                { return py::dict("from"_a = p.from, "to"_a = p.to); }));
+        machine_dict.emplace_back(
+            "id"_a = machine->id,
+            "type"_a = machine->type,
+            "status"_a = static_cast<int>(machine->status),
+            "working_operation"_a = machine->working_operation,
+            "waiting_operation"_a = machine->waiting_operation,
+            "materials"_a = materials,
+            "products"_a = products);
+    }
+    vector<py::dict> AGV_dict;
+    for (auto AGV : this->AGVs | views::values)
+    {
+        auto loaded_item = AGV->loaded_item.transform(
+            [](Product p)
+            { return py::dict("from"_a = p.from, "to"_a = p.to); });
+        auto target_item = AGV->target_item.transform(
+            [](Product p)
+            { return py::dict("from"_a = p.from, "to"_a = p.to); });
+
+        AGV_dict.emplace_back(
+            "id"_a = AGV->id,
+            "status"_a = static_cast<int>(AGV->status),
+            "speed"_a = AGV->speed,
+            "position"_a = AGV->position,
+            "target_machine"_a = AGV->target_machine,
+            "loaded_item"_a = loaded_item,
+            "target_item"_a = target_item,
+            "finish_timestamp"_a = AGV->finish_timestamp);
+    }
+    return py::dict(
+        "inited"_a = this->inited,
+        "timestamp"_a = this->timestamp,
+        "operations"_a = operation_dict,
+        "machines"_a = machine_dict,
+        "AGVs"_a = AGV_dict,
+        "distances"_a = this->distances,
+        "next_operation_id"_a = this->next_operation_id,
+        "next_machine_id"_a = this->next_machine_id,
+        "next_AGV_id"_a = this->next_AGV_id);
 }
 
-shared_ptr<Graph> Graph::set_state(py::tuple t)
+shared_ptr<Graph> Graph::from_state(py::dict d)
 {
     auto res = make_shared<Graph>();
-    res->timestamp = t[0].cast<float>();
+    res->operations.clear();
+    res->machines.clear();
+    res->AGVs.clear();
+
+    res->inited = d["inited"].cast<bool>();
+    res->timestamp = d["timestamp"].cast<float>();
+    for (auto operation_dict : d["operations"].cast<vector<py::dict>>())
+    {
+        auto new_operation = make_shared<Operation>(
+            operation_dict["id"].cast<OperationId>(),
+            operation_dict["machine_type"].cast<MachineType>(),
+            operation_dict["process_time"].cast<float>());
+        new_operation->status = static_cast<OperationStatus>(operation_dict["status"].cast<int>());
+        new_operation->processing_machine = operation_dict["processing_machine"].cast<optional<MachineId>>();
+        new_operation->finish_timestamp = operation_dict["finish_timestamp"].cast<float>();
+        new_operation->predecessors = set(from_range, operation_dict["predecessors"].cast<vector<OperationId>>());
+        new_operation->arrived_preds = set(from_range, operation_dict["arrived_preds"].cast<vector<OperationId>>());
+        new_operation->successors = set(from_range, operation_dict["successors"].cast<vector<OperationId>>());
+        new_operation->sent_succs = set(from_range, operation_dict["sent_succs"].cast<vector<OperationId>>());
+        res->operations[new_operation->id] = new_operation;
+        if (new_operation->status == OperationStatus::processing)
+        {
+            res->processing_operations.push(new_operation->id);
+        }
+    }
+    for (auto machine_dict : d["machines"].cast<vector<py::dict>>())
+    {
+        auto new_machine = make_shared<Machine>(machine_dict["id"].cast<MachineId>(),
+                                                machine_dict["type"].cast<MachineType>());
+        new_machine->status = static_cast<MachineStatus>(machine_dict["status"].cast<int>());
+        new_machine->working_operation = machine_dict["working_operation"].cast<optional<OperationId>>();
+        new_machine->waiting_operation = machine_dict["waiting_operation"].cast<optional<OperationId>>();
+        for (auto material_dict : machine_dict["materials"].cast<vector<py::dict>>())
+        {
+            new_machine->materials.emplace(material_dict["from"].cast<OperationId>(),
+                                           material_dict["to"].cast<OperationId>());
+        }
+        for (auto product_dict : machine_dict["products"].cast<vector<py::dict>>())
+        {
+            new_machine->products.emplace(product_dict["from"].cast<OperationId>(),
+                                          product_dict["to"].cast<OperationId>());
+        }
+        res->machines[new_machine->id] = new_machine;
+    }
+    for (auto AGV_dict : d["AGVs"].cast<vector<py::dict>>())
+    {
+        auto new_AGV = make_shared<AGV>(
+            AGV_dict["id"].cast<AGVId>(),
+            AGV_dict["speed"].cast<float>(),
+            AGV_dict["position"].cast<MachineId>());
+        new_AGV->status = static_cast<AGVStatus>(AGV_dict["status"].cast<int>());
+        new_AGV->speed = AGV_dict["speed"].cast<float>();
+        new_AGV->position = AGV_dict["position"].cast<MachineId>();
+        new_AGV->target_machine = AGV_dict["target_machine"].cast<MachineId>();
+        new_AGV->finish_timestamp = AGV_dict["finish_timestamp"].cast<float>();
+        new_AGV->loaded_item = AGV_dict["loaded_item"].cast<optional<py::dict>>().transform(
+            [](py::dict d)
+            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; });
+        new_AGV->target_item = AGV_dict["target_item"].cast<optional<py::dict>>().transform(
+            [](py::dict d)
+            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; });
+        res->AGVs[new_AGV->id] = new_AGV;
+        if (new_AGV->status != AGVStatus::idle)
+        {
+            res->moving_AGVs.push(new_AGV->id);
+        }
+    }
+    res->distances.clear();
+    for (auto [k1, v1] : d["distances"].cast<py::dict>())
+    {
+        map<MachineId, float> line;
+        for (auto [k2, v2] : v1.cast<py::dict>())
+        {
+            line[stoi(k2.cast<string>())] = v2.cast<float>();
+        }
+        res->distances[stoi(k1.cast<string>())] = line;
+    }
+
+    res->next_operation_id = d["next_operation_id"].cast<OperationId>();
+    res->next_machine_id = d["next_machine_id"].cast<MachineId>();
+    res->next_AGV_id = d["next_AGV_id"].cast<AGVId>();
+
     return res;
 }
 
@@ -363,7 +509,7 @@ void Graph::set_timestamp(float value)
 string Graph::repr()
 {
     stringstream ss;
-    ss << format("<job (timestamp: {:.2f})", this->timestamp);
+    ss << format("<job (inited: {}, timestamp: {:.2f})", this->inited, this->timestamp);
     ss << format("\n operation: {}\n", this->operations.size());
     for (auto &&[id, operation] : this->operations)
     {
@@ -447,7 +593,7 @@ shared_ptr<Graph> Graph::rand_generate(
     MachineType min_machine_type = Graph::dummy_machine_type + 1;
     MachineType max_machine_type = Graph::dummy_machine_type + machine_type_count;
     uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
-    vector<MachineId> machines;
+    vector<MachineId> machines{Graph::dummy_machine_id};
 
     for (MachineType t = min_machine_type; t <= max_machine_type; t++)
     {
@@ -471,10 +617,9 @@ shared_ptr<Graph> Graph::rand_generate(
     }
 
     uniform_real_distribution AGV_speed_dist(min_speed, max_speed);
-    uniform_int_distribution<MachineId> machine_idx_dist(0, machines.size() - 1);
     for (size_t i = 0; i < AGV_count; i++)
     {
-        ret->add_AGV(AGV_speed_dist(engine), machines[machine_idx_dist(engine)]);
+        ret->add_AGV(AGV_speed_dist(engine), Graph::dummy_machine_id);
     }
 
     uniform_real_distribution<float> process_time_dist(min_process_time, max_process_time);
@@ -495,6 +640,7 @@ shared_ptr<Graph> Graph::rand_generate(
 
 void Graph::init()
 {
+    assert(!this->inited);
     auto begin_operation = this->operations[this->begin_operation_id];
     begin_operation->status = OperationStatus::finished;
     auto dummy_machine = this->machines[this->dummy_machine_id];

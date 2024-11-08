@@ -51,10 +51,8 @@ function BuildBind {
     $stubgenCmd = $stubgenCmd + "-o ."
 
     Invoke-Expression $stubgenCmd
-}
 
-function TryInstallModule {
-    if($install){
+    if ($install) {
         Set-Location "$($root)/binds/module"
         pip install -e .
 
@@ -63,7 +61,7 @@ function TryInstallModule {
     }
 }
 
-function BuildBackend {
+function BuildFrontend {
     Set-Location "$($root)/backend"
 
     pyinstaller main.py --noconfirm
@@ -73,10 +71,8 @@ function BuildBackend {
     $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
 
     Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/backend-$($prefix).exe" -Force
-}
 
-function BuildFrontend {
-    Push-Location "$($root)/frontend"
+    Set-Location "$($root)/frontend"
 
     if (-Not (Test-Path node_modules)) {
         npm install
@@ -88,14 +84,14 @@ function BuildFrontend {
     else {
         npm run tauri build
     }
-    
 }
+
 
 try {
     switch ($target) {
-        "module" { BuildBind; TryInstallModule }
-        "frontend" { BuildBackend; BuildFrontend }
-        "all" { BuildBind; TryInstallModule; BuildBackend; BuildFrontend }
+        "module" { BuildBind }
+        "frontend" { BuildFrontend }
+        "all" { BuildBind; BuildFrontend }
     }
 }
 finally {
