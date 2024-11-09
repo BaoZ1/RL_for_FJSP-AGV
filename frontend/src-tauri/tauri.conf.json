@@ -32,7 +32,7 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-        "binaries/backend"
+        "binaries/FJSP-AGV_backend"
     ]
   }
 }

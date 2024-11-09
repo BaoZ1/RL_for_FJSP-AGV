@@ -64,13 +64,13 @@ function BuildBind {
 function BuildFrontend {
     Set-Location "$($root)/backend"
 
-    pyinstaller main.py --noconfirm
+    pyinstaller main.py -F --noconfirm
 
     Set-Location $root
 
     $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
 
-    Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/backend-$($prefix).exe" -Force
+    Move-Item "backend/dist/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
 
     Set-Location "$($root)/frontend"
 
