@@ -134,6 +134,7 @@ Graph::Graph() : inited(false),
 {
     this->operations[this->begin_operation_id] = make_shared<Operation>(this->begin_operation_id, this->dummy_machine_type, 0.0f);
     this->operations[this->end_operation_id] = make_shared<Operation>(this->end_operation_id, this->dummy_machine_type, 0.0f);
+    this->add_relation(this->begin_operation_id, this->end_operation_id);
 
     this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type);
 

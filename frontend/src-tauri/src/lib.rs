@@ -1,6 +1,6 @@
-use std::{sync::Mutex, thread::sleep, time::Duration};
+use std::sync::Mutex;
 use sysinfo::{Pid, System};
-use tauri::async_runtime::{spawn, JoinHandle};
+use tauri::async_runtime::spawn;
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
@@ -19,24 +19,28 @@ impl AppState {
 
 const BACKEND_NAME: &str = "FJSP-AGV_backend";
 
-fn refresh_backend_pids(pids: &mut Vec<Pid>)
-{
+fn refresh_backend_pids(pids: &mut Vec<Pid>) {
     pids.clear();
 
     let mut sys = System::new_all();
     sys.refresh_all();
 
     for (pid, process) in sys.processes() {
-        if process.name().to_str().unwrap().to_string().starts_with(BACKEND_NAME) {
+        if process
+            .name()
+            .to_str()
+            .unwrap()
+            .to_string()
+            .starts_with(BACKEND_NAME)
+        {
             pids.push(*pid);
             println!("found backend process: {}", pid.to_string());
         }
     }
 }
 
-
 #[tauri::command]
-fn launch_backend(app: tauri::AppHandle, _port: u32) -> Result<(), String> {
+fn launch_backend(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<AppState>>();
     let mut state_data = state.lock().unwrap();
 
@@ -54,32 +58,31 @@ fn launch_backend(app: tauri::AppHandle, _port: u32) -> Result<(), String> {
         .expect("failed to spawn backend");
 
     let handle = app.clone();
-     spawn(async move {
+    spawn(async move {
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Stdout(line_bytes) = event {
                 let line = String::from_utf8_lossy(&line_bytes);
                 handle
                     .emit("backend_message", format!("{}", line))
                     .expect("failed to emit event");
-                println!("got msg: {}", line);
             }
         }
     });
 
-    sleep(Duration::from_millis(500));
-    refresh_backend_pids(&mut state_data.backend_pids);
-    if state_data.backend_pids.len() > 0 {
-        return Ok(());
-    } else {
-        return Err("fail to track backend".into());
-    }
+    Ok(())
 }
 
 fn _close_backend(pids: &mut Vec<Pid>) -> Result<(), String> {
     let mut sys = System::new_all();
     sys.refresh_all();
     for (_, process) in sys.processes() {
-        if process.name().to_str().unwrap().to_string().starts_with(BACKEND_NAME) {
+        if process
+            .name()
+            .to_str()
+            .unwrap()
+            .to_string()
+            .starts_with(BACKEND_NAME)
+        {
             if !process.kill() {
                 panic!("fail to kill backend process")
             }
@@ -87,6 +90,16 @@ fn _close_backend(pids: &mut Vec<Pid>) -> Result<(), String> {
     }
     pids.clear();
     return Ok(());
+}
+
+#[tauri::command]
+fn check_backend(app: tauri::AppHandle) -> bool {
+    let state = app.state::<Mutex<AppState>>();
+    let mut state_data = state.lock().unwrap();
+
+    refresh_backend_pids(&mut state_data.backend_pids);
+
+    state_data.backend_pids.len() != 0
 }
 
 #[tauri::command]
@@ -100,6 +113,7 @@ fn close_backend(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
         .manage::<Mutex<AppState>>(Mutex::new(AppState::new()))
@@ -112,7 +126,11 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![launch_backend, close_backend])
+        .invoke_handler(tauri::generate_handler![
+            launch_backend,
+            close_backend,
+            check_backend
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
