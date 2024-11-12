@@ -60,11 +60,20 @@ fn launch_backend(app: tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
     spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let CommandEvent::Stdout(line_bytes) = event {
-                let line = String::from_utf8_lossy(&line_bytes);
-                handle
-                    .emit("backend_message", format!("{}", line))
-                    .expect("failed to emit event");
+            match event {
+                CommandEvent::Stderr(vec) => handle
+                    .emit(
+                        "backend_error",
+                        format!("{}", String::from_utf8_lossy(&vec)),
+                    )
+                    .expect("failed to emit event"),
+                CommandEvent::Stdout(vec) => handle
+                    .emit(
+                        "backend_message",
+                        format!("{}", String::from_utf8_lossy(&vec)),
+                    )
+                    .expect("failed to emit event"),
+                _ => (),
             }
         }
     });

@@ -19,7 +19,7 @@ def get_new_env() -> EnvState:
 
 @app.get("/rand_env")
 def get_rand_env(params: GenerationParams = Query()) -> EnvState:
-    return Graph.rand_generate(*params).get_state()
+    return Graph.rand_generate(**params.model_dump()).get_state()
 
 
 if __name__ == "__main__":

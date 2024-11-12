@@ -6,9 +6,10 @@ import { Button, List, Flex } from "antd"
 import { invoke } from "@tauri-apps/api/core";
 import { css } from "@emotion/react";
 
+enum MsgType { message, error }
 
 const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
-  const [backendMsgs, setBackendMsgs] = useState<string[]>([])
+  const [backendMsgs, setBackendMsgs] = useState<{ type: MsgType, content: string }[]>([])
   const [restarting, setRestarting] = useState<boolean>(false)
 
   const restart = async () => {
@@ -20,7 +21,17 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
 
   useEffect(() => {
     let unlisten = listen<string>("backend_message", (msg) => {
-      setBackendMsgs((prev) => [...prev, msg.payload])
+      setBackendMsgs((prev) => [...prev, {type: MsgType.message, content: msg.payload}])
+    })
+
+    return () => {
+      unlisten.then((f) => f())
+    }
+  }, [])
+
+  useEffect(() => {
+    let unlisten = listen<string>("backend_error", (err) => {
+      setBackendMsgs((prev) => [...prev, { type: MsgType.error, content: err.payload }])
     })
 
     return () => {
@@ -36,7 +47,13 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
         overflow: auto;
         margin-top: 10px;
       `}>
-        {backendMsgs.map((msg, idx) => <List.Item key={idx}>{msg}</List.Item>)}
+        {backendMsgs.map(({type, content}, idx) => (
+          <List.Item key={idx} css={css`
+            color: ${type === MsgType.error ? "red" : "black"};
+          `}>
+            {content}
+          </List.Item>
+        ))}
       </List>
     </div>
   );

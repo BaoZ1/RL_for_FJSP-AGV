@@ -335,13 +335,7 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
 
 OperationId Graph::add_operation(MachineType type, float process_time)
 {
-    auto node = make_shared<Operation>(this->next_operation_id++, type, process_time);
-    this->operations[node->id] = node;
-    node->predecessors = {this->begin_operation_id};
-    this->operations[this->begin_operation_id]->successors.emplace(node->id);
-    node->successors = {this->end_operation_id};
-    this->operations[this->end_operation_id]->predecessors.emplace(node->id);
-    return node->id;
+    return this->insert_operation(type, process_time, nullopt, nullopt);
 }
 
 void Graph::add_relation(OperationId from, OperationId to)
@@ -391,6 +385,16 @@ OperationId Graph::insert_operation(
     optional<OperationId> successor)
 {
     assert(!(predecessor.has_value() && successor.has_value()));
+    if (this->operations.size() == 2)
+    {
+        assert(this->operations[this->begin_operation_id]->successors.size() == 1);
+        assert(this->operations[this->begin_operation_id]->successors.contains(this->end_operation_id));
+        assert(this->operations[this->end_operation_id]->predecessors.size() == 1);
+        assert(this->operations[this->end_operation_id]->predecessors.contains(this->begin_operation_id));
+
+        this->operations[this->begin_operation_id]->successors.clear();
+        this->operations[this->end_operation_id]->predecessors.clear();
+    }
     auto node = make_shared<Operation>(this->next_operation_id++, type, process_time);
     this->operations[node->id] = node;
     if (predecessor.has_value())
@@ -459,6 +463,15 @@ void Graph::remove_operation(OperationId id)
                 s_node->predecessors.emplace(p_node->id);
             }
         }
+    }
+    if (this->operations.size() == 2) {
+        assert(this->operations.contains(this->begin_operation_id));
+        assert(this->operations.contains(this->end_operation_id));
+        assert(this->operations[this->begin_operation_id]->successors.empty());
+        assert(this->operations[this->end_operation_id]->predecessors.empty());
+
+        this->operations[this->begin_operation_id]->successors = {this->end_operation_id};
+        this->operations[this->end_operation_id]->predecessors = {this->begin_operation_id};
     }
 }
 
