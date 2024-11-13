@@ -14,7 +14,7 @@ function App() {
   useEffect(() => {
     const p = invoke("launch_backend")
     return () => {
-      p.then(() => invoke("close_backend"))
+    //   p.then(() => invoke("close_backend"))
     }
   }, [])
 

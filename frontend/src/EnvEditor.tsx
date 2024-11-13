@@ -1,37 +1,186 @@
 /** @jsxImportSource @emotion/react */
 
-import { FC, useEffect, useState, useMemo, MouseEvent, WheelEvent } from "react"
+import { FC, useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
 import { Splitter, Button, Layout, Card, Empty, Flex, Modal, Form, InputNumber, Space, FormInstance, FloatButton } from "antd"
 import { open } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
-import { useFloating, useClientPoint, useInteractions, useHover, offset } from '@floating-ui/react';
-import { RedoOutlined, CaretRightFilled, AimOutlined } from '@ant-design/icons';
+import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon } from '@floating-ui/react';
+import { RedoOutlined, CaretRightFilled, AimOutlined, PlusCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { OperationState, EnvState, GenerationParams } from "./types";
 import { loadEnv, newEnv, randEnv } from "./backend-api";
 
 const OperationNode: FC<{
   className?: string,
   operation: { id: number, x: number, y: number },
-  radius: number
+  radius: number,
+  scaleRate: number
 }> = (props) => {
-  return (
-    <div className={props.className} css={css`
-      width: ${props.radius * 2}px;
-      height: ${props.radius * 2}px;
-      border-radius: ${props.radius}px;
-      border: 2px solid gray;
-      transform: translate(-50%, -50%);
-      position: absolute;
-      left: ${props.operation.x}px;
-      top: ${props.operation.y}px;
-      background-color: wheat;
-      z-index: 1;
-      :hover {
-        border-color: red;
+  const type = ({ 0: "start", 9999: "end" } as const)[props.operation.id] || "normal"
+
+  const scaleRateRef = useRef(props.scaleRate)
+  useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
+
+  const [reference, setReference] = useState<HTMLElement | null>(null)
+
+  const [isAddSuccOpen, setIsAddSuccOpen] = useState(false);
+  const {
+    refs: addSuccRefs,
+    floatingStyles: addSuccFloatingStyles,
+    context: addSuccContext
+  } = useFloating({
+    placement: "right",
+    open: isAddSuccOpen,
+    onOpenChange: setIsAddSuccOpen,
+    elements: { reference },
+    middleware: [offset(({ x, y, rects: { floating: { height } } }) => {
+      const placement_offset_x = 0
+      const placement_offset_y = -height / 2
+      const raw_offset_x = x - placement_offset_x
+      const raw_offset_y = y - placement_offset_y
+      const scaled_offset_offset = 5 / scaleRateRef.current
+
+      return {
+        mainAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current
       }
-    `}>
-      {props.operation.id}
-    </div>
+    })]
+  });
+  const addSuccHover = useHover(addSuccContext, { handleClose: safePolygon() });
+  const {getFloatingProps: getAddSuccFloatingProps} = useInteractions([ addSuccHover]);
+
+  const [isAddPredOpen, setIsAddPredOpen] = useState(false);
+  const {
+    refs: addPredRefs,
+    floatingStyles: addPredFloatingStyles,
+    context: addPredContext
+  } = useFloating({
+    placement: "left",
+    open: isAddSuccOpen,
+    onOpenChange: setIsAddPredOpen,
+    elements: { reference },
+    middleware: [offset(({ x, y, rects: { floating: { width, height } } }) => {
+      const placement_offset_x = width
+      const placement_offset_y = -height / 2
+      const raw_offset_x = -x - placement_offset_x
+      const raw_offset_y = y - placement_offset_y
+      const scaled_offset_offset = 5 / scaleRateRef.current
+
+      return {
+        mainAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current
+      }
+    })]
+  });
+  const addPredHover = useHover(addPredContext, { handleClose: safePolygon() });
+  const { getFloatingProps: getAddPredFloatingProps } = useInteractions([addPredHover]);
+
+  const [isRemoveOpen, setIsRemoveOpen] = useState(false);
+  const {
+    refs: removeRefs,
+    floatingStyles: removeFloatingStyles,
+    context: removeContext
+  } = useFloating({
+    placement: "bottom",
+    open: isAddSuccOpen,
+    onOpenChange: setIsRemoveOpen,
+    elements: { reference },
+    middleware: [offset(({ x, y, rects: { floating: { width, height } } }) => {
+      const placement_offset_x = - width / 2
+      const placement_offset_y = 0
+      const raw_offset_x = x - placement_offset_x
+      const raw_offset_y = y - placement_offset_y
+      const scaled_offset_offset = 5 / scaleRateRef.current
+
+      return {
+        mainAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current
+      }
+    })]
+  });
+  const removeHover = useHover(removeContext, { handleClose: safePolygon() });
+  const { getFloatingProps: getRemoveFloatingProps } = useInteractions([removeHover]);
+
+  const {getReferenceProps} = useInteractions([addSuccHover, addPredHover, removeHover])
+
+  return (
+    <>
+      <div className={props.className} ref={setReference} {...getReferenceProps()}
+        css={css`
+          width: ${props.radius * 2}px;
+          height: ${props.radius * 2}px;
+          border-radius: ${props.radius}px;
+          border: 2px ${type === "normal" ? "solid" : "dashed"} gray;
+          transform: translate(-50%, -50%);
+          position: absolute;
+          left: ${props.operation.x}px;
+          top: ${props.operation.y}px;
+          background-color: wheat;
+          z-index: 1;
+          :hover {
+            border-color: red;
+          }
+        `}
+      >
+        {props.operation.id}
+      </div>
+      {
+        isAddSuccOpen && type !== "end" && (
+          <PlusCircleOutlined css={css`
+              font-size: 25px;
+              position: absolute;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              background-color: white;
+              color: #747474;
+
+              :hover {
+                color: black;
+              }
+            `}
+            ref={addSuccRefs.setFloating} {...getAddSuccFloatingProps()} style={addSuccFloatingStyles}
+          />
+        )
+      }
+      {
+        isAddPredOpen && type !== "start" && (
+          <PlusCircleOutlined css={css`
+            font-size: 25px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: white;
+            color: #747474;
+
+            :hover {
+              color: black;
+            }
+          `}
+          ref={addPredRefs.setFloating} {...getAddPredFloatingProps()} style={addPredFloatingStyles}
+          />
+        )
+      }
+      {
+        isRemoveOpen && type === "normal" && (
+          <CloseCircleOutlined css={css`
+            font-size: 25px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: white;
+            color: #fe9b9b;
+
+            :hover {
+              color: red;
+            }
+          `}
+            ref={removeRefs.setFloating} {...getRemoveFloatingProps()} style={removeFloatingStyles}
+          />
+        )
+      }
+    </>
   )
 }
 
@@ -39,15 +188,28 @@ const OperationLine: FC<{
   className?: string,
   p: { id: number, x: number, y: number },
   s: { id: number, x: number, y: number },
-  nodeRadius: number
+  nodeRadius: number,
+  scaleRate: number
 }> = (props) => {
   const [isOpen, setIsOpen] = useState(false);
-
+  const scaleRateRef = useRef(props.scaleRate)
+  useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
   const { refs, floatingStyles, context } = useFloating({
     placement: "top",
     open: isOpen,
     onOpenChange: setIsOpen,
-    middleware: [offset(10)]
+    middleware: [offset(({ x, y, rects: { floating: { width, height } } }) => {
+      const top_offset_x = -width / 2
+      const top_offset_y = height
+      const raw_offset_x = x - top_offset_x
+      const raw_offset_y = -y - top_offset_y
+      const scaled_offset_offset = 10 / scaleRateRef.current
+
+      return {
+        mainAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current
+      }
+    })]
   });
   const clientPoint = useClientPoint(context);
   const hover = useHover(context);
@@ -57,34 +219,35 @@ const OperationLine: FC<{
   const len = raw_len - props.nodeRadius * 2
   const rot = Math.asin((props.s.y - props.p.y) / raw_len)
 
-  const center_x = (props.p.x + props.s.x) / 2  - len / 2
+  const center_x = (props.p.x + props.s.x) / 2 - len / 2
   const center_y = (props.p.y + props.s.y) / 2
+
 
   return (
     <>
       <div className={props.className}
         ref={refs.setReference} {...getReferenceProps()} css={css`
-          width: ${len}px;
-          border: 1px ${props.p.id === 0 || props.s.id === 9999 ? "dashed" : "solid"} black;
-          position: absolute;
-          rotate: ${rot}rad;
-          left: calc(50% + ${center_x}px);
-          top: calc(50% + ${center_y}px);
-          z-index: 0;
-          :hover {
-            border-color: red;
-            z-index: 4;
-            & > * {
-              color: red;
-            }
+        width: ${len}px;
+        border: 1px ${props.p.id === 0 || props.s.id === 9999 ? "dashed" : "solid"} black;
+        position: absolute;
+        rotate: ${rot}rad;
+        left: calc(50% + ${center_x}px);
+        top: calc(50% + ${center_y}px);
+        z-index: 0;
+        :hover {
+          border-color: red;
+          z-index: 4;
+          & > * {
+            color: red;
           }
-        `}
+        }
+      `}
       >
         <CaretRightFilled css={css`
           position: absolute;
           right: 0;
           translate: 40% -50%;
-        `}/>
+        `} />
       </div>
       {isOpen && (
         <div
@@ -118,16 +281,15 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
   const nodeRadius = 25
 
   const resetPos = () => {
-    setGraphOffset({x: 0, y: 0})
+    setGraphOffset({ x: 0, y: 0 })
     setScaleRatio(1)
   }
 
-
-  useEffect(() => {
-    let predecessors_info: { 
-      id: number, 
-      remains: number[], 
-      preds_pos: number[] 
+  const fix_sort = () => {
+    let predecessors_info: {
+      id: number,
+      remains: number[],
+      preds_pos: number[]
     }[] = props.states.map((item) => ({ id: item.id, remains: item.predecessors, preds_pos: [] }))
 
     const layers: number[][] = []
@@ -151,7 +313,7 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
         predecessors_info.forEach((item) => {
           if (item.remains.includes(id)) {
             item.preds_pos.push(idx / new_layer.length)
-            item.remains = item.remains.filter((rid)=>rid !== id)
+            item.remains = item.remains.filter((rid) => rid !== id)
           }
         })
       }
@@ -168,7 +330,9 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
       }
     }
     setOperationPosList(pos_list)
-  }, [props.states])
+  }
+
+  useEffect(fix_sort, [props.states])
 
   const trackGraphDrag = (e: MouseEvent) => {
     e.preventDefault()
@@ -181,17 +345,19 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
       setGraphOffset(({ x, y }) => ({ x: x + dx, y: y + dy }))
       prev_x = e.clientX
       prev_y = e.clientY
-    };
+    }
     const handleMouseUp = () => {
-      removeEventListener('mousemove', handleMouseMove);
-      removeEventListener('mouseup', handleMouseUp);
-    };
-    addEventListener('mousemove', handleMouseMove);
-    addEventListener('mouseup', handleMouseUp);
+      removeEventListener('mousemove', handleMouseMove)
+      removeEventListener('mouseup', handleMouseUp)
+    }
+    addEventListener('mousemove', handleMouseMove)
+    addEventListener('mouseup', handleMouseUp)
   }
 
   const updateScale = (e: WheelEvent) => {
-    setScaleRatio((prev)=> prev * (e.deltaY < 0 ? 1.1 : 0.9))
+    const rate = e.deltaY < 0 ? 1.1 : (1 / 1.1)
+    setScaleRatio((prev) => prev * rate)
+    setGraphOffset(({ x: px, y: py }) => ({ x: px * rate, y: py * rate }))
   }
 
   const graph_doms = useMemo(() => [
@@ -199,13 +365,13 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
       props.states.find((item) => item.id === s.id)!.predecessors.map((pred_id) => (
         operationPosList.find((item) => item.id === pred_id)!
       )).map((p) => (
-        <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} />
+        <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRate={scaleRatio} />
       ))
     )),
     operationPosList.map((operation) => (
-      <OperationNode key={operation.id} operation={operation} radius={nodeRadius} />
+      <OperationNode key={operation.id} operation={operation} radius={nodeRadius} scaleRate={scaleRatio} />
     ))
-  ], [operationPosList])
+  ], [operationPosList, scaleRatio])
 
   return (
     <div className={props.className}
@@ -214,10 +380,11 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
         position: relative;
         overflow: hidden;
       `}
-      >
+    >
       <div css={css`
         width: 0;
         height: 0;
+        /* border: 5px solid red; */
         position: absolute;
         overflow: visible;
         top: calc(50% + ${graphOffset.y}px);
