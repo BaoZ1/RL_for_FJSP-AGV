@@ -21,3 +21,4 @@ backend/dist
 **/*.spec
 **/*.pyd
 **/*.pyi
+*.code-workspace

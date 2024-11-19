@@ -4,9 +4,9 @@ import { FC, useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from
 import { Splitter, Button, Layout, Card, Empty, Flex, Modal, Form, InputNumber, Space, FormInstance, FloatButton } from "antd"
 import { open } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
-import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon } from '@floating-ui/react';
-import { RedoOutlined, CaretRightFilled, AimOutlined, PlusCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
-import { OperationState, EnvState, GenerationParams } from "./types";
+import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon, arrow } from '@floating-ui/react';
+import { RedoOutlined, CaretRightFilled, AimOutlined, PlusCircleOutlined, CloseCircleOutlined, PlusOutlined } from '@ant-design/icons';
+import { OperationState, EnvState, GenerationParams, AGVState } from "./types";
 import { loadEnv, newEnv, randEnv } from "./backend-api";
 
 const OperationNode: FC<{
@@ -46,7 +46,7 @@ const OperationNode: FC<{
     })]
   });
   const addSuccHover = useHover(addSuccContext, { handleClose: safePolygon() });
-  const {getFloatingProps: getAddSuccFloatingProps} = useInteractions([ addSuccHover]);
+  const { getFloatingProps: getAddSuccFloatingProps } = useInteractions([addSuccHover]);
 
   const [isAddPredOpen, setIsAddPredOpen] = useState(false);
   const {
@@ -84,7 +84,7 @@ const OperationNode: FC<{
     open: isAddSuccOpen,
     onOpenChange: setIsRemoveOpen,
     elements: { reference },
-    middleware: [offset(({ x, y, rects: { floating: { width, height } } }) => {
+    middleware: [offset(({ x, y, rects: { floating: { width } } }) => {
       const placement_offset_x = - width / 2
       const placement_offset_y = 0
       const raw_offset_x = x - placement_offset_x
@@ -100,7 +100,7 @@ const OperationNode: FC<{
   const removeHover = useHover(removeContext, { handleClose: safePolygon() });
   const { getFloatingProps: getRemoveFloatingProps } = useInteractions([removeHover]);
 
-  const {getReferenceProps} = useInteractions([addSuccHover, addPredHover, removeHover])
+  const { getReferenceProps } = useInteractions([addSuccHover, addPredHover, removeHover])
 
   return (
     <>
@@ -132,7 +132,8 @@ const OperationNode: FC<{
               left: 50%;
               transform: translate(-50%, -50%);
               background-color: white;
-              color: #747474;
+              border-radius: 50%;
+              color: #888888;
 
               :hover {
                 color: black;
@@ -151,13 +152,14 @@ const OperationNode: FC<{
             left: 50%;
             transform: translate(-50%, -50%);
             background-color: white;
-            color: #747474;
+            border-radius: 50%;
+            color: #888888;
 
             :hover {
               color: black;
             }
           `}
-          ref={addPredRefs.setFloating} {...getAddPredFloatingProps()} style={addPredFloatingStyles}
+            ref={addPredRefs.setFloating} {...getAddPredFloatingProps()} style={addPredFloatingStyles}
           />
         )
       }
@@ -170,6 +172,7 @@ const OperationNode: FC<{
             left: 50%;
             transform: translate(-50%, -50%);
             background-color: white;
+            border-radius: 50%;
             color: #fe9b9b;
 
             :hover {
@@ -404,6 +407,97 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
   )
 }
 
+const AGVNode: FC<{state: AGVState}> = (props) => {
+  const [reference, setReference] = useState<HTMLElement | null>(null)
+  const arrowRef = useRef(null)
+
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
+  const { refs: infoRefs, floatingStyles: infoFloatingStyles, context: infoContexts, middlewareData } = useFloating({
+    placement: "top",
+    open: isInfoOpen,
+    onOpenChange: setIsInfoOpen,
+    elements: {reference},
+    middleware: [offset(10), arrow({element: arrowRef})]
+  });
+  const infoHover = useHover(infoContexts);
+  const { getFloatingProps: getInfoFloatingProps } = useInteractions([infoHover]);
+
+  const [isRemoveOpen, setIsRemoveOpen] = useState(false);
+  const { refs: removeRefs, floatingStyles: removeFloatingStyles, context: removeContexts } = useFloating({
+    placement: "bottom-end",
+    open: isRemoveOpen,
+    onOpenChange: setIsRemoveOpen,
+    elements: { reference }
+  });
+  const removeHover = useHover(removeContexts, { handleClose: safePolygon() });
+  const { getFloatingProps: getRemoveFloatingProps } = useInteractions([removeHover]);
+
+  const { getReferenceProps } = useInteractions([infoHover, removeHover])
+
+  return (
+    <>
+      <div ref={setReference} {...getReferenceProps()} css={css`
+        width: 50px;
+        height: 50px;
+        background-color: black;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        border-radius: 50%;
+      `}>
+        <div css={css`
+          color: white;
+          font-size: larger;
+        `}>
+          {props.state.id}
+        </div>
+      </div>
+      {
+        isInfoOpen && (
+          <div ref={infoRefs.setFloating} {...getInfoFloatingProps()} style={infoFloatingStyles} css={css`
+            padding: 5px;
+            border: 1px solid gray;
+            background-color: white;
+            border-radius: 5px;
+          `}>
+            12345679
+            <div ref={arrowRef} css={css`
+              position: absolute;
+              left: ${middlewareData.arrow?.x}px;
+              bottom: -10px;
+              width: 0;
+              height: 0;
+              border-left: 6px solid transparent;  
+              border-right: 6px solid transparent;  
+              border-top: 10px solid gray; 
+            `}/>
+          </div>
+        )
+      }
+      {
+        isRemoveOpen && (
+          <CloseCircleOutlined css={css`
+            font-size: 25px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: white;
+            border-radius: 50%;
+            color: #fe9b9b;
+
+            :hover {
+              color: red;
+            }
+          `}
+            ref={removeRefs.setFloating} {...getRemoveFloatingProps()} style={removeFloatingStyles}
+          />
+        )
+      }
+    </>
+  )
+}
+
 const RandParamConfigForm: FC<{ formData: FormInstance<GenerationParams>, onFinish: (values: GenerationParams) => void }> = (props) => {
 
   return (
@@ -513,42 +607,66 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
               padding: 0;
             }
           `}>
-            <Splitter>
-              <Splitter.Panel defaultSize="70%">
-                {
-                  envState === null
-                    ?
-                    <Flex justify="center" align="center" css={css`
+            {
+              envState === null
+                ?
+                <Flex justify="center" align="center" css={css`
                       height: 100%;
                     `}>
-                      <Empty>
-                        <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
-                      </Empty>
-                    </Flex>
-                    :
+                  <Empty>
+                    <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
+                  </Empty>
+                </Flex>
+                :
+                <Splitter>
+                  <Splitter.Panel defaultSize="70%">
                     <GraphEditor states={envState.operations} css={css`
                       width: 100%;
                       height: 100%;
                     `} />
-                }
 
-              </Splitter.Panel>
-              <Splitter.Panel>
-                {
-                  envState === null
-                    ?
-                    <Flex justify="center" align="center" css={css`
-                      height: 100%;
-                    `}>
-                      <Empty>
-                        <Button type="primary" onClick={newEnv}>新建</Button>
-                      </Empty>
-                    </Flex>
-                    :
-                    <></>
-                }
-              </Splitter.Panel>
-            </Splitter>
+                  </Splitter.Panel>
+                  <Splitter.Panel min="20%" collapsible>
+                    <Splitter layout="vertical">
+                      <Splitter.Panel defaultSize="70%">
+                        <></>
+                      </Splitter.Panel>
+                      <Splitter.Panel>
+                        <Flex gap="middle" wrap css={css`
+                          padding: 15px;
+                        `}>
+                          {
+                            envState.AGVs.map((v)=><AGVNode state={v} />)
+                          }
+                          <div css={css`
+                            width: 50px;
+                            height: 50px;
+                            background-color: white;
+                            border: 2px dashed gray;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            border-radius: 50%;
+
+                            :hover {
+                              border-color: red;
+                              & > * {
+                                color: red;
+                              }
+                            }
+                          `}>
+                            <div css={css`
+                              font-size: larger;
+                            `}>
+                              <PlusOutlined/>
+                            </div>
+                          </div>
+                        </Flex>
+                      </Splitter.Panel>
+                    </Splitter>
+                  </Splitter.Panel>
+                </Splitter>
+            }
           </Card>
         </Layout.Content>
       </Layout>
