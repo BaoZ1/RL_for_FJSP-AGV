@@ -13,6 +13,7 @@ export type OperationState = {
 export type MachineState = {
     id: number
     type: number
+    pos: {x: number, y: number}
     status: number
     working_operation: number | null
     waiting_operation: number | null
@@ -37,7 +38,8 @@ export type EnvState = {
     operations: OperationState[]
     machines: MachineState[]
     AGVs: AGVState[]
-    distances: Record<number, Record<number, number>>
+    paths: {[from: number]: {[to: number]: number[]}}
+    // distances: Record<number, Record<number, number>>
     next_operation_id: number
     next_machine_id: number
     next_AGV_id: number

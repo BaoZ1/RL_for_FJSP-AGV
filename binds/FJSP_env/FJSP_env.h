@@ -40,11 +40,12 @@ struct Operation
 
 struct Machine
 {
-    Machine(MachineId, MachineType);
+    Machine(MachineId, MachineType, Position);
     string repr();
 
     MachineId id;
     MachineType type;
+    Position pos;
     MachineStatus status;
     optional<OperationId> working_operation, waiting_operation;
     set<Product> materials, products;
@@ -106,7 +107,7 @@ public:
     shared_ptr<Operation> get_operation(OperationId);
     bool contains(OperationId);
 
-    MachineId add_machine(MachineType);
+    MachineId add_machine(MachineType, Position);
     shared_ptr<Machine> get_machine(MachineId);
 
     AGVId add_AGV(float, MachineId);
@@ -117,9 +118,9 @@ public:
 
     string repr();
 
-    void set_distance(MachineId, MachineId, float);
-    void set_distance(map<MachineId, map<MachineId, float>> &);
-    void set_rand_distance(float, float);
+    void add_path(MachineId, MachineId);
+    void remove_path(MachineId, MachineId);
+    void calc_distance();
     float get_travel_time(MachineId, MachineId, AGVId);
 
     static shared_ptr<Graph> rand_generate(size_t, size_t, size_t, size_t, float, float, float, float, float);
@@ -163,6 +164,7 @@ protected:
     map<MachineId, shared_ptr<Machine>> machines;
     map<AGVId, shared_ptr<AGV>> AGVs;
 
+    map<MachineId, map<MachineId, vector<MachineId>>> paths;
     map<MachineId, map<MachineId, float>> distances;
 
     ProcessingOperationQueue processing_operations;

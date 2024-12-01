@@ -28,6 +28,9 @@ PYBIND11_MODULE(FJSP_env, m)
         .value("pick", ActionType::pick)
         .value("transport", ActionType::transport);
 
+    py::class_<Position, shared_ptr<Position>>(m, "Position")
+        .def("__repr__", &Position::repr);
+
     py::class_<Product, shared_ptr<Product>>(m, "Product")
         .def("__repr__", &Product::repr);
 
@@ -56,15 +59,15 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("insert_operation", &Graph::insert_operation, "machine_type"_a, "process_time"_a, "predecessors"_a = nullopt, "successors"_a = nullopt)
         .def("remove_operation", &Graph::remove_operation, "operation_id"_a)
         .def("get_operation", &Graph::get_operation, "operation_id"_a)
-        .def("add_machine", &Graph::add_machine, "machine_type"_a)
+        .def("add_machine", &Graph::add_machine, "machine_type"_a, "position"_a)
         .def("get_machine", &Graph::get_machine, "machine_id"_a)
         .def("add_AGV", &Graph::add_AGV, "speed"_a, "init_pos"_a)
         .def("get_AGV", &Graph::get_AGV, "AGV_id"_a)
         .def("get_timestamp", &Graph::get_timestamp)
         .def("get_travel_time", &Graph::get_travel_time, "from"_a, "to"_a, "agv"_a)
-        .def("set_distance", py::overload_cast<MachineId, MachineId, float>(&Graph::set_distance), "from"_a, "to"_a, "distance"_a)
-        .def("set_distance", py::overload_cast<map<MachineId, map<MachineId, float>> &>(&Graph::set_distance), "data"_a)
-        .def("set_rand_distance", &Graph::set_rand_distance, "min_dist"_a, "max_dist"_a)
+        .def("add_path", &Graph::add_path, "a"_a, "b"_a)
+        .def("remove_path", &Graph::remove_path, "a"_a,"b"_a)
+        .def("calc_distance", &Graph::calc_distance)
         .def_static("rand_generate", &Graph::rand_generate, "operation_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
         .def("init", &Graph::init)
         .def("copy", &Graph::copy)

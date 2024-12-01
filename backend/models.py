@@ -17,11 +17,15 @@ class OperationState(BaseModel):
 class ProductState(BaseModel):
     from_: int = Field(alias="from")
     to: int
-
+    
+class Position(BaseModel):
+    x: float
+    y: float
 
 class MachineState(BaseModel):
     id: int
     type: int
+    pos: Position
     status: int
     working_operation: int | None
     waiting_operation: int | None
@@ -46,7 +50,8 @@ class EnvState(BaseModel):
     operations: list[OperationState]
     machines: list[MachineState]
     AGVs: list[AGVState]
-    distances: dict[int, dict[int, float]]
+    paths: dict[int, dict[int, list[int]]]
+    # distances: dict[int, dict[int, float]]
     next_operation_id: int
     next_machine_id: int
     next_AGV_id: int

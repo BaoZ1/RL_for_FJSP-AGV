@@ -62,10 +62,11 @@ string Operation::repr()
     return ss.str();
 }
 
-Machine::Machine(MachineId id, MachineType tp) : id(id),
-                                                 type(tp),
-                                                 status(MachineStatus::idle),
-                                                 working_operation(nullopt)
+Machine::Machine(MachineId id, MachineType tp, Position pos) : id(id),
+                                                               type(tp),
+                                                               pos(pos),
+                                                               status(MachineStatus::idle),
+                                                               working_operation(nullopt)
 {
 }
 
@@ -136,7 +137,9 @@ Graph::Graph() : inited(false),
     this->operations[this->end_operation_id] = make_shared<Operation>(this->end_operation_id, this->dummy_machine_type, 0.0f);
     this->add_relation(this->begin_operation_id, this->end_operation_id);
 
-    this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type);
+    this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type, Position{0, 0});
+    auto&& dummy_path_row = this->paths.emplace(this->dummy_machine_id, map<MachineId, vector<MachineId>>()).first->second;
+    dummy_path_row.emplace(this->dummy_machine_id, vector<MachineId>{this->dummy_machine_id});
 
     this->next_operation_id = 1;
     this->next_machine_id = 1;
@@ -207,6 +210,7 @@ py::dict Graph::get_state()
         machine_dict.emplace_back(
             "id"_a = machine->id,
             "type"_a = machine->type,
+            "pos"_a = py::dict("x"_a = machine->pos.x, "y"_a = machine->pos.y),
             "status"_a = static_cast<int>(machine->status),
             "working_operation"_a = machine->working_operation,
             "waiting_operation"_a = machine->waiting_operation,
@@ -239,7 +243,8 @@ py::dict Graph::get_state()
         "operations"_a = operation_dict,
         "machines"_a = machine_dict,
         "AGVs"_a = AGV_dict,
-        "distances"_a = this->distances,
+        "paths"_a = this->paths,
+        // "distances"_a = this->distances,
         "next_operation_id"_a = this->next_operation_id,
         "next_machine_id"_a = this->next_machine_id,
         "next_AGV_id"_a = this->next_AGV_id);
@@ -275,8 +280,10 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
     }
     for (auto machine_dict : d["machines"].cast<vector<py::dict>>())
     {
+        auto pos_dict = machine_dict["pos"].cast<py::dict>();
         auto new_machine = make_shared<Machine>(machine_dict["id"].cast<MachineId>(),
-                                                machine_dict["type"].cast<MachineType>());
+                                                machine_dict["type"].cast<MachineType>(),
+                                                Position{pos_dict["x"].cast<float>(), pos_dict["y"].cast<float>()});
         new_machine->status = static_cast<MachineStatus>(machine_dict["status"].cast<int>());
         new_machine->working_operation = machine_dict["working_operation"].cast<optional<OperationId>>();
         new_machine->waiting_operation = machine_dict["waiting_operation"].cast<optional<OperationId>>();
@@ -315,16 +322,28 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
             res->moving_AGVs.push(new_AGV->id);
         }
     }
-    res->distances.clear();
-    for (auto [k1, v1] : d["distances"].cast<py::dict>())
+
+    res->paths.clear();
+    for (auto [k1, v1] : d["paths"].cast<py::dict>())
     {
-        map<MachineId, float> line;
+        map<MachineId, vector<MachineId>> line;
         for (auto [k2, v2] : v1.cast<py::dict>())
         {
-            line[stoi(k2.cast<string>())] = v2.cast<float>();
+            line[stoi(k2.cast<string>())] = v2.cast<vector<MachineId>>();
         }
-        res->distances[stoi(k1.cast<string>())] = line;
+        res->paths[stoi(k1.cast<string>())] = line;
     }
+
+    // res->distances.clear();
+    // for (auto [k1, v1] : d["distances"].cast<py::dict>())
+    // {
+    //     map<MachineId, float> line;
+    //     for (auto [k2, v2] : v1.cast<py::dict>())
+    //     {
+    //         line[stoi(k2.cast<string>())] = v2.cast<float>();
+    //     }
+    //     res->distances[stoi(k1.cast<string>())] = line;
+    // }
 
     res->next_operation_id = d["next_operation_id"].cast<OperationId>();
     res->next_machine_id = d["next_machine_id"].cast<MachineId>();
@@ -464,7 +483,8 @@ void Graph::remove_operation(OperationId id)
             }
         }
     }
-    if (this->operations.size() == 2) {
+    if (this->operations.size() == 2)
+    {
         assert(this->operations.contains(this->begin_operation_id));
         assert(this->operations.contains(this->end_operation_id));
         assert(this->operations[this->begin_operation_id]->successors.empty());
@@ -485,10 +505,20 @@ shared_ptr<Operation> Graph::get_operation(OperationId id)
     return this->operations[id];
 }
 
-MachineId Graph::add_machine(MachineType type)
+MachineId Graph::add_machine(MachineType type, Position pos)
 {
-    auto node = make_shared<Machine>(this->next_machine_id++, type);
+    auto node = make_shared<Machine>(this->next_machine_id++, type, pos);
     this->machines[node->id] = node;
+    for (auto prev : this->paths | views::values)
+    {
+        prev[node->id] = {};
+    }
+    auto&& new_row = this->paths.emplace(node->id, map<MachineId, vector<MachineId>>()).first->second;
+    for (auto id : this->machines | views::keys)
+    {
+        new_row[id] = {};
+    }
+    new_row[node->id].emplace_back(node->id);
     return node->id;
 }
 
@@ -557,25 +587,67 @@ string Graph::repr()
     return ss.str();
 }
 
-void Graph::set_distance(MachineId from, MachineId to, float distance)
+void Graph::add_path(MachineId a, MachineId b)
 {
-    this->distances.try_emplace(from, map<MachineId, float>{}).first->second[to] = distance;
+    this->distances.clear();
+    this->paths[a][b] = {b};
+    this->paths[b][a] = {a};
 }
 
-void Graph::set_distance(map<MachineId, map<MachineId, float>> &other)
+void Graph::remove_path(MachineId a, MachineId b)
 {
-    this->distances = other;
+    assert(this->paths[a][b] == vector<MachineId>{b});
+    assert(this->paths[b][a] == vector<MachineId>{a});
+    this->distances.clear();
+    this->paths[a][b].clear();
+    this->paths[b][a].clear();
 }
 
-void Graph::set_rand_distance(float min_distance, float max_distance)
+void Graph::calc_distance()
 {
-    mt19937 engine(random_device{}());
-    uniform_real_distribution distance_dist(min_distance, max_distance);
-    for (auto [from_id, _] : this->machines)
+    this->distances.clear();
+    for (auto f_id : this->machines | views::keys)
     {
-        for (auto [to_id, _] : this->machines)
+        auto&& dist_row = this->distances.emplace(f_id, map<MachineId, float>()).first->second;
+        for (auto t_id : this->machines | views::keys)
         {
-            this->set_distance(from_id, to_id, from_id == to_id ? 0 : distance_dist(engine));
+            dist_row.emplace(t_id, numeric_limits<float>::infinity() / 3);
+        }
+    }
+    for (auto id : this->machines | views::keys)
+    {
+        this->distances[id][id] = 0;
+    }
+    for (auto [f_id, tos] : this->paths)
+    {
+        for (auto [t_id, path] : tos)
+        {
+            if (path.size() == 1)
+            {
+                this->distances[f_id][t_id] = this->machines[f_id]->pos.distance(this->machines[t_id]->pos);
+            }
+        }
+    }
+    for (auto m_id : this->machines | views::keys)
+    {
+        for (auto f_id : this->machines | views::keys)
+        {
+            for (auto t_id : this->machines | views::keys)
+            {
+                if (this->paths[f_id][m_id].empty() || this->paths[m_id][t_id].empty())
+                {
+                    continue;
+                }
+                float dist = this->distances[f_id][m_id] + this->distances[m_id][t_id];
+                if (this->distances[f_id][t_id] > dist)
+                {
+                    this->distances[f_id][t_id] = dist;
+                    auto &&path = this->paths[f_id][t_id];
+                    path.clear();
+                    path.append_range(this->paths[f_id][m_id]);
+                    path.append_range(this->paths[m_id][t_id]);
+                }
+            }
         }
     }
 }
@@ -607,30 +679,52 @@ shared_ptr<Graph> Graph::rand_generate(
     MachineType min_machine_type = Graph::dummy_machine_type + 1;
     MachineType max_machine_type = Graph::dummy_machine_type + machine_type_count;
     uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
+    uniform_real_distribution<float> machine_pos_x_dist(5, 50);
+    uniform_real_distribution<float> machine_pos_y_dist(5, 50);
     vector<MachineId> machines{Graph::dummy_machine_id};
 
     for (MachineType t = min_machine_type; t <= max_machine_type; t++)
     {
-        machines.emplace_back(ret->add_machine(t));
+        Position pos{machine_pos_x_dist(engine), machine_pos_y_dist(engine)};
+        machines.emplace_back(ret->add_machine(t, pos));
     }
     for (size_t i = machine_type_count; i < machine_count; i++)
     {
-        machines.emplace_back(ret->add_machine(machine_type_dist(engine)));
+        Position pos{machine_pos_x_dist(engine), machine_pos_y_dist(engine)};
+        machines.emplace_back(ret->add_machine(machine_type_dist(engine), pos));
     }
 
-    float max_speed = 1, min_speed = min_max_speed_ratio;
-    float max_distance = max_transport_time * min_speed;
-    float min_distance = min_transport_time * max_speed;
-    uniform_real_distribution distance_dist(min_distance, max_distance);
-    for (MachineId from_id : machines)
+    uniform_int_distribution<size_t> machine_idx_dist(0, machines.size() - 1);
+    UnionFind<MachineId> uf(machines);
+    while (uf.count() != 1)
     {
-        for (MachineId to_id : machines)
+        MachineId a = machines[machine_idx_dist(engine)];
+        MachineId b = machines[machine_idx_dist(engine)];
+        if (!ret->paths[a][b].empty())
         {
-            ret->set_distance(from_id, to_id, from_id == to_id ? 0 : distance_dist(engine));
+            continue;
+        }
+        ret->add_path(a, b);
+        uf.unite(a, b);
+    }
+    ret->calc_distance();
+    float min_dist = numeric_limits<float>::max();
+    float max_dist = numeric_limits<float>::min();
+    DEBUG_OUT("min: {}, max: {}", min_dist, max_dist);
+    for (auto [f_id, tos] : ret->distances)
+    {
+        for (auto [t_id, dist] : tos)
+        {
+            if (t_id == f_id)
+            {
+                continue;
+            }
+            min_dist = min(min_dist, dist);
+            max_dist = max(max_dist, dist);
         }
     }
-
-    uniform_real_distribution AGV_speed_dist(min_speed, max_speed);
+    float min_speed = max_dist / max_transport_time;
+    uniform_real_distribution AGV_speed_dist(min_speed, min_speed / min_max_speed_ratio);
     for (size_t i = 0; i < AGV_count; i++)
     {
         ret->add_AGV(AGV_speed_dist(engine), Graph::dummy_machine_id);

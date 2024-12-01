@@ -2,6 +2,7 @@
 
 #include <tuple>
 #include <vector>
+#include <cmath>
 
 using namespace std;
 
@@ -21,6 +22,21 @@ enum class OperationStatus
     // waiting_transport,
     // transporting,
     finished
+};
+
+struct Position
+{
+    float x;
+    float y;
+
+    string repr()
+    {
+        return format("({:.2f},{:.2f})", this->x, this->y);
+    }
+
+    float distance(Position other) {
+        return hypotf(x - other.x, y - other.y);
+    }
 };
 
 enum class MachineStatus
@@ -108,4 +124,47 @@ public:
 private:
     vector<T> data;
     Comp comp;
+};
+
+template<typename T>
+class UnionFind
+{
+public:
+    UnionFind(vector<T> elements)
+    {
+        next_idx = 0;
+        for(auto e : elements)
+        {
+            forward_mapper[e] = next_idx;
+            backward_mapper[next_idx] = e;
+            father[next_idx] = next_idx;
+            next_idx++;
+        }
+    }
+
+    T find(T target)
+    {
+        int idx = forward_mapper[target];
+        return backward_mapper[father[idx] == idx ? idx : father[idx] = this->find(father[idx])];
+    }
+
+    void unite(T from, T to)
+    {
+        this->father[this->find(this->forward_mapper[from])] = this->find(this->forward_mapper[to]);
+    }
+
+    int count()
+    {
+        set<int> roots;
+        for(auto [idx, _] : this->father)
+        {
+            roots.emplace(forward_mapper[find(idx)]);
+        }
+        return roots.size();
+    }
+private:
+    int next_idx;
+    map<T, int> forward_mapper;
+    map<int, T> backward_mapper;
+    map<int, int> father;
 };

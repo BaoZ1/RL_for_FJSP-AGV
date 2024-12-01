@@ -134,6 +134,27 @@ int comp2int(const strong_ordering &od)
     return 0;
 }
 
+template<typename T>
+string v2s(vector<T> vec)
+{
+    if(vec.empty())
+    {
+        return string("[]");
+    }
+    if(vec.size() == 1)
+    {
+        return format("[{}]", vec[0]);
+    }
+    stringstream ss;
+    ss << "[" << vec[0];
+    for(auto it = vec.begin() + 1; it != vec.end(); it++)
+    {
+        ss << "," << *it;
+    }
+    ss << "]";
+    return ss.str();
+}
+
 template <typename T>
 string o2s(optional<T> o, string on_empty = "null")
 {

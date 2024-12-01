@@ -6,8 +6,8 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
 import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon, arrow } from '@floating-ui/react';
 import { RedoOutlined, CaretRightFilled, AimOutlined, PlusCircleOutlined, CloseCircleOutlined, PlusOutlined } from '@ant-design/icons';
-import { OperationState, EnvState, GenerationParams, AGVState } from "./types";
-import { loadEnv, newEnv, randEnv } from "./backend-api";
+import { OperationState, EnvState, GenerationParams, AGVState, MachineState } from "./types";
+import { addPath, loadEnv, newEnv, randEnv } from "./backend-api";
 
 const OperationNode: FC<{
   className?: string,
@@ -407,7 +407,164 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
   )
 }
 
-const AGVNode: FC<{state: AGVState}> = (props) => {
+const MachineNode: FC<{
+  className?: string,
+  selected: boolean,
+  onClick: () => void,
+  onDrag: (dx: number, dy: number) => void
+}> = (props) => {
+
+  const trackDrag = (e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    let prev_x = e.clientX
+    let prev_y = e.clientY
+
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      const dx = e.clientX - prev_x
+      const dy = e.clientY - prev_y
+      props.onDrag(dx, dy)
+      prev_x = e.clientX
+      prev_y = e.clientY
+    }
+    const handleMouseUp = () => {
+      removeEventListener('mousemove', handleMouseMove)
+      removeEventListener('mouseup', handleMouseUp)
+    }
+    addEventListener('mousemove', handleMouseMove)
+    addEventListener('mouseup', handleMouseUp)
+  }
+
+  return (
+    <div className={props.className} onMouseDown={trackDrag} 
+      onClick={(e)=>{
+        e.stopPropagation()
+        props.onClick()
+      }}
+      css={css`
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background-color: gray;
+        border: 5px solid ${props.selected ? "red" : "black"};
+      `}
+    ></div>
+  )
+}
+
+const MachinePath: FC<{
+  className?: string
+}> = (props) => {
+
+  return (
+    <div className={props.className} css={css`
+        
+      `}
+    />
+  )
+}
+
+const MachineEditor: FC<{
+  className?: string,
+  states: MachineState[],
+  paths: { [from: number]: { [to: number]: number[] } },
+  selected: number | null,
+  onBackgroundClicked: () => void,
+  onMachineClicked: (id: number) => void,
+  onMachineDragged: (id: number, dx: number, dy: number) => void
+}> = (props) => {
+  const [scaleRatio, setScaleRatio] = useState<number>(1)
+  const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
+
+  const trackDrag = (e: MouseEvent) => {
+    e.preventDefault()
+    let prev_x = e.clientX
+    let prev_y = e.clientY
+
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      const dx = e.clientX - prev_x
+      const dy = e.clientY - prev_y
+      setOffset(({ x, y }) => ({ x: x + dx, y: y + dy }))
+      prev_x = e.clientX
+      prev_y = e.clientY
+    }
+    const handleMouseUp = () => {
+      removeEventListener('mousemove', handleMouseMove)
+      removeEventListener('mouseup', handleMouseUp)
+    }
+    addEventListener('mousemove', handleMouseMove)
+    addEventListener('mouseup', handleMouseUp)
+  }
+
+  const updateScale = (e: WheelEvent) => {
+    const rate = e.deltaY < 0 ? 1.1 : (1 / 1.1)
+    setScaleRatio((prev) => prev * rate)
+    setOffset(({ x: px, y: py }) => ({ x: px * rate, y: py * rate }))
+  }
+
+  return (
+    <div className={props.className} onMouseDown={trackDrag} onWheel={updateScale}
+      onClick={props.onBackgroundClicked} css={css`
+        position: relative;
+        overflow: hidden;
+      `}
+    >
+      <div css={css`
+        width: 0;
+        height: 0;
+        /* border: 5px solid red; */
+        position: absolute;
+        overflow: visible;
+        top: calc(50% + ${offset.y}px);
+        left: calc(50% + ${offset.x}px);
+      `}>
+        {
+          props.states.map((state) => (
+            <MachineNode key={state.id} selected={state.id === props.selected}
+              onClick={() => props.onMachineClicked(state.id)}
+              onDrag={(dx, dy) => props.onMachineDragged(state.id, dx / scaleRatio, dy / scaleRatio)}
+              css={css`
+                position: absolute;
+                bottom: ${state.pos.y * scaleRatio}px;
+                left: ${state.pos.x * scaleRatio}px;
+                translate: -50% 50%;
+                z-index: 10;
+              `}
+            />
+          ))
+        }
+        {
+          Object.entries(props.paths).map(([f_id, tos]) => (
+            Object.entries(tos).filter(([t_id, path]) => f_id !== t_id && path.length == 1).map(([t_id, _]) => {
+              const pos1 = props.states.find((item) => item.id == parseInt(f_id))!.pos
+              const pos2 = props.states.find((item) => item.id == parseInt(t_id))!.pos
+
+              const dx = pos1.x - pos2.x
+              const dy = pos1.y - pos2.y
+              const len = Math.hypot(dx, dy) * scaleRatio
+              const rot = Math.PI - Math.atan2(dy, dx)
+              return (
+                <MachinePath key={`${f_id}-${t_id}`} css={css`
+                    position: absolute;
+                    width: ${len}px;
+                    border: 1px solid black;
+                    transform-origin: 0% 50%;
+                    rotate: ${rot}rad;
+                    left: ${pos1.x * scaleRatio}px;
+                    bottom: ${pos1.y * scaleRatio}px;
+                  `}
+                />
+              )
+            })
+          ))
+        }
+      </div>
+    </div>
+  )
+}
+
+const AGVNode: FC<{ state: AGVState }> = (props) => {
   const [reference, setReference] = useState<HTMLElement | null>(null)
   const arrowRef = useRef(null)
 
@@ -416,8 +573,8 @@ const AGVNode: FC<{state: AGVState}> = (props) => {
     placement: "top",
     open: isInfoOpen,
     onOpenChange: setIsInfoOpen,
-    elements: {reference},
-    middleware: [offset(10), arrow({element: arrowRef})]
+    elements: { reference },
+    middleware: [offset(10), arrow({ element: arrowRef })]
   });
   const infoHover = useHover(infoContexts);
   const { getFloatingProps: getInfoFloatingProps } = useInteractions([infoHover]);
@@ -470,7 +627,7 @@ const AGVNode: FC<{state: AGVState}> = (props) => {
               border-left: 6px solid transparent;  
               border-right: 6px solid transparent;  
               border-top: 10px solid gray; 
-            `}/>
+            `} />
           </div>
         )
       }
@@ -566,6 +723,26 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [paramsForm] = Form.useForm<GenerationParams>()
 
+  const [selectedMachine, setSelectedMachine] = useState<number | null>(null)
+  const handelMachineClick = async (id: number) => {
+    console.log(id)
+    if (selectedMachine === null) {
+      setSelectedMachine(id)
+    }
+    else {
+      setEnvState(await addPath(envState!, selectedMachine, id))
+      setSelectedMachine(null)
+    }
+  }
+  const updateMachinePos = (id: number, dx: number, dy: number) => {
+    setEnvState((env) => {
+      const ret = structuredClone(env!)
+      const target = ret.machines.find((item) => item.id === id)!
+      target.pos = { x: target.pos.x + dx, y: target.pos.y - dy }
+      return ret
+    })
+  }
+
   return (
     <>
       <Layout className={className}>
@@ -621,22 +798,30 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                 <Splitter>
                   <Splitter.Panel defaultSize="70%">
                     <GraphEditor states={envState.operations} css={css`
-                      width: 100%;
-                      height: 100%;
-                    `} />
-
+                        width: 100%;
+                        height: 100%;
+                      `}
+                    />
                   </Splitter.Panel>
                   <Splitter.Panel min="20%" collapsible>
                     <Splitter layout="vertical">
                       <Splitter.Panel defaultSize="70%">
-                        <></>
+                        <MachineEditor states={envState.machines} paths={envState.paths}
+                          selected={selectedMachine}
+                          onBackgroundClicked={() => setSelectedMachine(null)}
+                          onMachineClicked={handelMachineClick}
+                          onMachineDragged={updateMachinePos} css={css`
+                            width: 100%;
+                            height: 100%;
+                          `}
+                        />
                       </Splitter.Panel>
                       <Splitter.Panel>
                         <Flex gap="middle" wrap css={css`
                           padding: 15px;
                         `}>
                           {
-                            envState.AGVs.map((v)=><AGVNode state={v} />)
+                            envState.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
                           }
                           <div css={css`
                             width: 50px;
@@ -658,7 +843,7 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                             <div css={css`
                               font-size: larger;
                             `}>
-                              <PlusOutlined/>
+                              <PlusOutlined />
                             </div>
                           </div>
                         </Flex>
@@ -675,7 +860,8 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
           onFinish={async (values) => {
             setIsModalOpen(false)
             setEnvState(await randEnv(values))
-          }} />
+          }}
+        />
       </Modal>
     </>
   )
