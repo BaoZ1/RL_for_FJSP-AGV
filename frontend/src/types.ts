@@ -45,6 +45,13 @@ export type EnvState = {
     next_AGV_id: number
 }
 
+export type AddOperationParams = {
+  machine_type: number
+  process_time: number
+  pred: number | null
+  succ: number | null
+}
+
 export type GenerationParams = {
     operation_count: number
     machine_count: number

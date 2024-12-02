@@ -329,9 +329,9 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         map<MachineId, vector<MachineId>> line;
         for (auto [k2, v2] : v1.cast<py::dict>())
         {
-            line[stoi(k2.cast<string>())] = v2.cast<vector<MachineId>>();
+            line[k2.cast<int>()] = v2.cast<vector<MachineId>>();
         }
-        res->paths[stoi(k1.cast<string>())] = line;
+        res->paths[k1.cast<int>()] = line;
     }
 
     // res->distances.clear();
@@ -458,6 +458,7 @@ void Graph::remove_operation(OperationId id)
     assert(id != this->begin_operation_id && id != this->end_operation_id);
 
     auto node = this->operations[id];
+    this->operations.erase(id);
     auto ps = node->predecessors | views::transform([this](OperationId p_id)
                                                     { return this->operations[p_id]; });
     auto ss = node->successors | views::transform([this](OperationId s_id)
@@ -476,7 +477,7 @@ void Graph::remove_operation(OperationId id)
         for (auto s_node : ss)
         {
             bool is_end = s_node->id == this->end_operation_id;
-            if (!(is_begin && is_end))
+            if (!(is_begin && is_end) && p_node->successors.empty())
             {
                 p_node->successors.emplace(s_node->id);
                 s_node->predecessors.emplace(p_node->id);

@@ -20,47 +20,65 @@ def get_new_env() -> EnvState:
     return Graph().get_state()
 
 
-@app.get("env/local")
-def get_local_save(path: Path) -> EnvState:
+@app.get("/env/local")
+def get_local_save(
+    path: Annotated[Path, Query()],
+) -> EnvState:
     return json.load(path.open())
 
 
-@app.post("env/local")
-def get_local_save(path: Path, state: Annotated[EnvState, Body()]) -> None:
+@app.post("/env/local")
+def get_local_save(
+    path: Annotated[Path, Query()],
+    state: Annotated[EnvState, Body()],
+) -> None:
     json.dump(state.model_dump(), path.open("w"))
 
 
-@app.get("env/rand")
-def get_rand_env(params: Annotated[GenerationParams, Query()]) -> EnvState:
+@app.get("/env/rand")
+def get_rand_env(
+    params: Annotated[GenerationParams, Query()],
+) -> EnvState:
     return Graph.rand_generate(**params.model_dump()).get_state()
 
 
 @app.put("/operation/add")
 def add_operation(
     graph: Annotated[Graph, Depends(use_graph)],
-    type: int,
-    time: int,
-    pred: int | None,
-    succ: int | None,
+    type: Annotated[int, Query()],
+    time: Annotated[float, Query()],
+    pred: Annotated[int | None, Query()] = None,
+    succ: Annotated[int | None, Query()] = None,
 ) -> EnvState:
     graph.insert_operation(type, time, pred, succ)
     return graph.get_state()
 
 
 @app.put("/operation/remove")
-def remove_operation(graph: Annotated[Graph, Depends(use_graph)], id: int) -> EnvState:
+def remove_operation(
+    graph: Annotated[Graph, Depends(use_graph)],
+    id: Annotated[int, Query()],
+) -> EnvState:
     graph.remove_operation(id)
     return graph.get_state()
 
 
 @app.put("/path/add")
-def add_path(graph: Annotated[Graph, Depends(use_graph)], a: int, b: int) -> EnvState:
+def add_path(
+    graph: Annotated[Graph, Depends(use_graph)],
+    a: Annotated[int, Query()],
+    b: Annotated[int, Query()],
+) -> EnvState:
     graph.add_path(a, b)
     return graph.get_state()
 
 
 @app.put("/path/remove")
-def remove_path(graph: Annotated[Graph, Depends(use_graph)], a: int, b: int) -> EnvState:
+def remove_path(
+    graph: Annotated[Graph, Depends(use_graph)],
+    a: Annotated[int, Query()],
+    b: Annotated[int, Query()],
+) -> EnvState:
     graph.remove_path(a, b)
     return graph.get_state()
 

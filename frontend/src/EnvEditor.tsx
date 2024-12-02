@@ -1,17 +1,31 @@
 /** @jsxImportSource @emotion/react */
 
 import { FC, useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
-import { Splitter, Button, Layout, Card, Empty, Flex, Modal, Form, InputNumber, Space, FormInstance, FloatButton } from "antd"
+import {
+  Splitter, Button, Layout, Card, Empty, Flex, Modal,
+  Form, InputNumber, Space, FormInstance, FloatButton, Select,
+} from "antd"
 import { open } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
-import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon, arrow } from '@floating-ui/react';
-import { RedoOutlined, CaretRightFilled, AimOutlined, PlusCircleOutlined, CloseCircleOutlined, PlusOutlined } from '@ant-design/icons';
-import { OperationState, EnvState, GenerationParams, AGVState, MachineState } from "./types";
-import { addPath, loadEnv, newEnv, randEnv } from "./backend-api";
+import {
+  useFloating, useClientPoint, useInteractions,
+  useHover, offset, safePolygon, arrow
+} from '@floating-ui/react';
+import {
+  RedoOutlined, CaretRightFilled, AimOutlined,
+  PlusCircleOutlined, CloseCircleOutlined, PlusOutlined
+} from '@ant-design/icons';
+import { OperationState, EnvState, GenerationParams, AGVState, MachineState, AddOperationParams } from "./types";
+import { addOperation, addPath, loadEnv, newEnv, randEnv, removeOperation } from "./backend-api";
 
 const OperationNode: FC<{
   className?: string,
   operation: { id: number, x: number, y: number },
+  selected: boolean,
+  onClick: () => void,
+  onAddPredClick: () => void,
+  onAddSuccClick: () => void,
+  onRemoveClick: () => void,
   radius: number,
   scaleRate: number
 }> = (props) => {
@@ -105,16 +119,23 @@ const OperationNode: FC<{
   return (
     <>
       <div className={props.className} ref={setReference} {...getReferenceProps()}
+        onClick={(e) => {
+          e.stopPropagation()
+          props.onClick()
+        }}
         css={css`
           width: ${props.radius * 2}px;
           height: ${props.radius * 2}px;
           border-radius: ${props.radius}px;
-          border: 2px ${type === "normal" ? "solid" : "dashed"} gray;
+          border: 2px ${type === "normal" ? "solid" : "dashed"} ${props.selected ? "red" : "black"};
           transform: translate(-50%, -50%);
           position: absolute;
           left: ${props.operation.x}px;
           top: ${props.operation.y}px;
           background-color: wheat;
+          display: flex;
+          justify-content: center;
+          align-items: center;
           z-index: 1;
           :hover {
             border-color: red;
@@ -125,7 +146,7 @@ const OperationNode: FC<{
       </div>
       {
         isAddSuccOpen && type !== "end" && (
-          <PlusCircleOutlined css={css`
+          <PlusCircleOutlined onClick={props.onAddSuccClick} css={css`
               font-size: 25px;
               position: absolute;
               top: 50%;
@@ -145,7 +166,7 @@ const OperationNode: FC<{
       }
       {
         isAddPredOpen && type !== "start" && (
-          <PlusCircleOutlined css={css`
+          <PlusCircleOutlined onClick={props.onAddPredClick} css={css`
             font-size: 25px;
             position: absolute;
             top: 50%;
@@ -165,7 +186,7 @@ const OperationNode: FC<{
       }
       {
         isRemoveOpen && type === "normal" && (
-          <CloseCircleOutlined css={css`
+          <CloseCircleOutlined onClick={props.onRemoveClick} css={css`
             font-size: 25px;
             position: absolute;
             top: 50%;
@@ -273,20 +294,21 @@ const OperationLine: FC<{
   )
 }
 
-const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props) => {
+const OperationEditor: FC<{
+  className?: string,
+  states: OperationState[],
+  selectedOperation: number | null,
+  onBackgroundClick: () => void,
+  onOperationClick: (id: number) => void,
+  onAddOperation: (pred: number | null, succ: number | null) => void,
+  onRemoveOperation: (id: number) => void
+}> = (props) => {
   const [operationPosList, setOperationPosList] = useState<{ id: number, x: number, y: number }[]>([])
-  const [graphOffset, setGraphOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
-  const [scaleRatio, setScaleRatio] = useState<number>(1)
 
   const colSpace = 150
   const rowSpace = 125
 
   const nodeRadius = 25
-
-  const resetPos = () => {
-    setGraphOffset({ x: 0, y: 0 })
-    setScaleRatio(1)
-  }
 
   const fix_sort = () => {
     let predecessors_info: {
@@ -334,15 +356,22 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
     }
     setOperationPosList(pos_list)
   }
-
   useEffect(fix_sort, [props.states])
 
+  const [graphOffset, setGraphOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
+  const [scaleRatio, setScaleRatio] = useState<number>(1)
+  const resetPos = () => {
+    setGraphOffset({ x: 0, y: 0 })
+    setScaleRatio(1)
+  }
+  const [isDragging, setIsDragging] = useState(false)
   const trackGraphDrag = (e: MouseEvent) => {
     e.preventDefault()
     let prev_x = e.clientX
     let prev_y = e.clientY
 
     const handleMouseMove = (e: globalThis.MouseEvent) => {
+      setIsDragging(true)
       const dx = e.clientX - prev_x
       const dy = e.clientY - prev_y
       setGraphOffset(({ x, y }) => ({ x: x + dx, y: y + dy }))
@@ -350,13 +379,13 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
       prev_y = e.clientY
     }
     const handleMouseUp = () => {
+      setTimeout(() => setIsDragging(false), 100)
       removeEventListener('mousemove', handleMouseMove)
       removeEventListener('mouseup', handleMouseUp)
     }
     addEventListener('mousemove', handleMouseMove)
     addEventListener('mouseup', handleMouseUp)
   }
-
   const updateScale = (e: WheelEvent) => {
     const rate = e.deltaY < 0 ? 1.1 : (1 / 1.1)
     setScaleRatio((prev) => prev * rate)
@@ -372,13 +401,26 @@ const GraphEditor: FC<{ className?: string, states: OperationState[] }> = (props
       ))
     )),
     operationPosList.map((operation) => (
-      <OperationNode key={operation.id} operation={operation} radius={nodeRadius} scaleRate={scaleRatio} />
+      <OperationNode key={operation.id} operation={operation} selected={operation.id === props.selectedOperation}
+        radius={nodeRadius} scaleRate={scaleRatio}
+        onClick={() => props.onOperationClick(operation.id)}
+        onAddPredClick={() => props.onAddOperation(null, operation.id)}
+        onAddSuccClick={() => props.onAddOperation(operation.id, null)}
+        onRemoveClick={() => props.onRemoveOperation(operation.id)}
+      />
     ))
-  ], [operationPosList, scaleRatio])
+  ], [operationPosList, scaleRatio, props.selectedOperation])
 
   return (
     <div className={props.className}
       onMouseDown={trackGraphDrag} onWheel={updateScale}
+      onClick={()=>{
+        if(!isDragging) {
+          console.log("GG");
+          
+          props.onBackgroundClick()
+        }
+      }} 
       css={css`
         position: relative;
         overflow: hidden;
@@ -437,8 +479,8 @@ const MachineNode: FC<{
   }
 
   return (
-    <div className={props.className} onMouseDown={trackDrag} 
-      onClick={(e)=>{
+    <div className={props.className} onMouseDown={trackDrag}
+      onClick={(e) => {
         e.stopPropagation()
         props.onClick()
       }}
@@ -447,7 +489,7 @@ const MachineNode: FC<{
         height: 50px;
         border-radius: 50%;
         background-color: gray;
-        border: 5px solid ${props.selected ? "red" : "black"};
+        border: 2px solid ${props.selected ? "red" : "black"};
       `}
     ></div>
   )
@@ -655,7 +697,102 @@ const AGVNode: FC<{ state: AGVState }> = (props) => {
   )
 }
 
-const RandParamConfigForm: FC<{ formData: FormInstance<GenerationParams>, onFinish: (values: GenerationParams) => void }> = (props) => {
+const AddOperationConfigForm: FC<{
+  formData: FormInstance<AddOperationParams>,
+  onFinish: () => void,
+  machines?: MachineState[]
+}> = (props) => {
+  const typeMap = new Map<number, number[]>()
+  props.machines?.forEach((machine) => {
+    typeMap.set(machine.type, [...(typeMap.get(machine.type) || []), machine.id])
+  })
+
+  const machineTypes = Array.from(typeMap.entries()).map(([type, machines]) => {
+    return {
+      label: `${type} (${machines})`,
+      disabled: type === 0,
+      value: type
+    }
+  })
+
+  return (
+    <Form form={props.formData} onFinish={props.onFinish}>
+      <Flex justify="center" align="center" css={css`
+          margin-bottom: 20px;
+        `}
+      >
+        <div css={css`
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px dashed black;
+            background-color: gray;
+            opacity: ${props.formData.getFieldValue("succ") !== null ? "1" : "0.3"};
+          `}
+        />
+        <div css={css`
+            width: 40px;
+            border: 1px solid black;
+            opacity: ${props.formData.getFieldValue("succ") !== null ? "1" : "0.3"};
+          `}
+        />
+        <div css={css`
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 2px solid black;
+            background-color: gray;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+          `}
+        >
+          {props.formData.getFieldValue("pred") || props.formData.getFieldValue("succ")}
+        </div>
+        <div css={css`
+            width: 40px;
+            border: 1px solid black;
+            opacity: ${props.formData.getFieldValue("pred") !== null ? "1" : "0.3"};
+          `}
+        />
+        <div css={css`
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px dashed black;
+            background-color: gray;
+            opacity: ${props.formData.getFieldValue("pred") !== null ? "1" : "0.3"};
+          `}
+        />
+      </Flex>
+      <Form.Item<AddOperationParams> name="machine_type" label="设备类型">
+        <Select options={machineTypes} />
+      </Form.Item>
+      <Form.Item<AddOperationParams> name="process_time" label="处理时间">
+        <InputNumber min={0} step={0.01} />
+      </Form.Item>
+      <Form.Item>
+        <Button type="primary" htmlType="submit">确定</Button>
+      </Form.Item>
+    </Form>
+  )
+}
+
+const OperationInfoForm: FC<{
+  formData: FormInstance<OperationState>,
+  onFinish: () => void
+}> = (props) => {
+  return (
+    <Form form={props.formData} onFinish={props.onFinish}>
+      <div>{props.formData.getFieldValue("id")}</div>
+    </Form>
+  )
+}
+
+const RandParamConfigForm: FC<{
+  formData: FormInstance<GenerationParams>,
+  onFinish: (values: GenerationParams) => void
+}> = (props) => {
 
   return (
     <Form form={props.formData} initialValues={{
@@ -690,7 +827,7 @@ const RandParamConfigForm: FC<{ formData: FormInstance<GenerationParams>, onFini
       <Form.Item<GenerationParams> name="machine_count" label="数量">
         <InputNumber min={2} max={10} />
       </Form.Item>
-      <Form.Item<GenerationParams> name="machine_type_count" label="种类">
+      <Form.Item<GenerationParams> name="machine_type_count" label="类型数量">
         <InputNumber min={1} max={5} />
       </Form.Item>
       <h4>AGV</h4>
@@ -720,14 +857,47 @@ const RandParamConfigForm: FC<{ formData: FormInstance<GenerationParams>, onFini
 
 const EnvEditor: FC<{ className?: string }> = ({ className }) => {
   const [envState, setEnvState] = useState<EnvState | null>(null)
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [paramsForm] = Form.useForm<GenerationParams>()
+
+  const [isRandModalOpen, setIsRandModalOpen] = useState(false)
+  const [randParamsForm] = Form.useForm<GenerationParams>()
+
+  const [isAddOperationModalOpen, setIsAddOperationModalOpen] = useState(false)
+  const [addOperationParamsForm] = Form.useForm<AddOperationParams>()
+  const handelAddOperation = (pred: number | null, succ: number | null) => {
+    addOperationParamsForm.setFieldsValue({ pred, succ })
+    setIsAddOperationModalOpen(true)
+  }
+  const handelRemoveOperation = async (id: number) => {
+    setEnvState(await removeOperation(envState!, id))
+  }
+
+  const [selectedOperation, setSelectedOperation] = useState<number | null>(null)
+  const [isOperationInfoModalOpen, setIsOperationInfoModalOpen] = useState(false)
+  const [operationInfoForm] = Form.useForm<OperationState>()
+  const handelOperationClick = async (id: number) => {
+    if (selectedOperation === null) {
+      setSelectedOperation(id)
+    }
+    else if (selectedOperation === id) {
+      setIsOperationInfoModalOpen(true)
+    }
+    else {
+
+    }
+  }
+  useEffect(()=>{
+    if(!isOperationInfoModalOpen) {
+      setSelectedOperation(null)
+    }
+  }, [isOperationInfoModalOpen])
 
   const [selectedMachine, setSelectedMachine] = useState<number | null>(null)
   const handelMachineClick = async (id: number) => {
-    console.log(id)
     if (selectedMachine === null) {
       setSelectedMachine(id)
+    }
+    else if (selectedMachine === id) {
+
     }
     else {
       setEnvState(await addPath(envState!, selectedMachine, id))
@@ -766,9 +936,9 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                 }
               }}>读取</Button>
               <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
-              <Button type="primary" onClick={() => setIsModalOpen(true)}>随机</Button>
+              <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
               <Button type="primary" shape="circle" onClick={async () => {
-                setEnvState(await randEnv(paramsForm.getFieldsValue()))
+                setEnvState(await randEnv(randParamsForm.getFieldsValue()))
               }} icon={<RedoOutlined />} />
             </Flex>
           </Card>
@@ -788,8 +958,9 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
               envState === null
                 ?
                 <Flex justify="center" align="center" css={css`
-                      height: 100%;
-                    `}>
+                    height: 100%;
+                  `}
+                >
                   <Empty>
                     <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
                   </Empty>
@@ -797,7 +968,12 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                 :
                 <Splitter>
                   <Splitter.Panel defaultSize="70%">
-                    <GraphEditor states={envState.operations} css={css`
+                    <OperationEditor states={envState.operations} selectedOperation={selectedOperation}
+                      onBackgroundClick={() => setSelectedOperation(null)}
+                      onOperationClick={handelOperationClick}
+                      onAddOperation={handelAddOperation}
+                      onRemoveOperation={handelRemoveOperation}
+                      css={css`
                         width: 100%;
                         height: 100%;
                       `}
@@ -855,10 +1031,29 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
           </Card>
         </Layout.Content>
       </Layout>
-      <Modal title="参数设置" open={isModalOpen} footer={null} onCancel={() => setIsModalOpen(false)}>
-        <RandParamConfigForm formData={paramsForm}
+      <Modal title="添加工序" open={isAddOperationModalOpen} footer={null} 
+        onCancel={() => setIsAddOperationModalOpen(false)}
+      >
+        <AddOperationConfigForm formData={addOperationParamsForm} machines={envState?.machines}
+          onFinish={async () => {
+            setIsAddOperationModalOpen(false)
+            setEnvState(await addOperation(envState!, addOperationParamsForm.getFieldsValue(true)))
+          }}
+        />
+      </Modal>
+      <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null} 
+        onCancel={() => setIsOperationInfoModalOpen(false)}
+      >
+        <OperationInfoForm formData={operationInfoForm}
+          onFinish={async () => {
+            setIsOperationInfoModalOpen(false)
+          }}
+        />
+      </Modal>
+      <Modal title="参数设置" open={isRandModalOpen} footer={null} onCancel={() => setIsRandModalOpen(false)}>
+        <RandParamConfigForm formData={randParamsForm}
           onFinish={async (values) => {
-            setIsModalOpen(false)
+            setIsRandModalOpen(false)
             setEnvState(await randEnv(values))
           }}
         />
