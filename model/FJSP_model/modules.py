@@ -4,7 +4,8 @@ from torch_geometric.data import HeteroData, Batch
 from torch_geometric import nn as gnn
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
-from FJSP_env import Graph
+from FJSP_env import Graph, Environment
+import lightning as L
 
 
 class BidiGATv2Conv(nn.Module):
@@ -23,23 +24,19 @@ class BidiGATv2Conv(nn.Module):
         if isinstance(out_channels, int):
             out_channels = (out_channels, out_channels)
 
-        self.forward_conv = (
-            gnn.GATv2Conv(
-                in_channels,
-                out_channels[0],
-                edge_dim=edge_dim,
-                dropout=dropout,
-                add_self_loops=False,
-            ),
+        self.forward_conv = gnn.GATv2Conv(
+            in_channels,
+            out_channels[0],
+            edge_dim=edge_dim,
+            dropout=dropout,
+            add_self_loops=False,
         )
-        self.backward_conv = (
-            gnn.GATv2Conv(
-                in_channels[::-1],
-                out_channels[1],
-                edge_dim=edge_dim,
-                dropout=dropout,
-                add_self_loops=False,
-            ),
+        self.backward_conv = gnn.GATv2Conv(
+            in_channels[::-1],
+            out_channels[1],
+            edge_dim=edge_dim,
+            dropout=dropout,
+            add_self_loops=False,
         )
 
     def forward(
@@ -55,9 +52,10 @@ class BidiGATv2Conv(nn.Module):
 
 
 class BidiHeteroConv(nn.Module):
+
     def __init__(
         self,
-        convs: dict[tuple[str, str, str], nn.Module],
+        convs: dict[EdgeType, nn.Module],
         aggr: str | None = "sum",
     ):
         super().__init__()
@@ -189,7 +187,7 @@ class ExtractLayer(nn.Module):
         return res
 
 
-class Mixer(nn.Module):
+class StateMixer(nn.Module):
     def __init__(
         self,
         node_channels: tuple[int, int, int],
@@ -224,7 +222,7 @@ class Mixer(nn.Module):
 
     def forward(
         self, x_dict: dict[NodeType, Tensor], batch_dict: dict[NodeType, Tensor]
-    ):
+    ) -> tuple[dict[NodeType, Tensor], Tensor]:
         edge_index_dict: dict[EdgeType, Tensor] = {}
 
         for k, batch in batch_dict.items():
@@ -248,11 +246,11 @@ class Mixer(nn.Module):
                 1,
             )
         )
-        
+
         return global_dict, graph_feature
 
 
-class Model(nn.Module):
+class StateExtract(nn.Module):
 
     def __init__(
         self,
@@ -290,7 +288,7 @@ class Model(nn.Module):
             ]
         )
 
-        self.mix = Mixer(
+        self.mix = StateMixer(
             (
                 operation_hidden_channels,
                 machine_hidden_channels,
@@ -300,7 +298,9 @@ class Model(nn.Module):
             graph_global_channels,
         )
 
-    def forward(self, data: HeteroData | Batch):
+    def forward(
+        self, data: HeteroData | Batch
+    ) -> tuple[dict[NodeType, Tensor], dict[NodeType, Tensor], Tensor]:
         x_dict = data.x_dict
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
@@ -316,5 +316,16 @@ class Model(nn.Module):
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
 
         global_dict, graph_feature = self.mix(x_dict, batch_dict)
-        
+
         return x_dict, global_dict, graph_feature
+
+
+class StateModel(L.LightningModule):
+    def __init__(self, model: StateExtract):
+        super().__init__()
+        
+        self.model = model
+        self.envs = Environment()
+        
+    def training_step(self, batch, batch_idx):
+        pass

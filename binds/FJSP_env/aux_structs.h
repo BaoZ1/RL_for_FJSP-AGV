@@ -59,7 +59,8 @@ enum class ActionType
 {
     move,
     pick,
-    transport
+    transport,
+    wait
 };
 
 template <size_t N, typename T, typename... Ts>

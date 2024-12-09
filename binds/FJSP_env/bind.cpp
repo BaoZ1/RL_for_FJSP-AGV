@@ -26,7 +26,8 @@ PYBIND11_MODULE(FJSP_env, m)
     py::enum_<ActionType>(m, "ActionType")
         .value("move", ActionType::move)
         .value("pick", ActionType::pick)
-        .value("transport", ActionType::transport);
+        .value("transport", ActionType::transport)
+        .value("wait", ActionType::wait);
 
     py::class_<Position, shared_ptr<Position>>(m, "Position")
         .def("__repr__", &Position::repr);
@@ -44,6 +45,7 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("__repr__", &AGV::repr);
 
     py::class_<Action, shared_ptr<Action>>(m, "Action")
+        .def(py::init<ActionType>(), "action_type"_a)
         .def(py::init<ActionType, AGVId, MachineId>(), "action_type"_a, "AGV_id"_a, "target_machine"_a)
         .def(py::init<ActionType, AGVId, MachineId, Product>(), "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_product"_a)
         .def_readwrite("action_type", &Action::type)
@@ -51,6 +53,9 @@ PYBIND11_MODULE(FJSP_env, m)
         .def_readwrite("target_machine", &Action::target_machine)
         .def_readwrite("target_product", &Action::target_product)
         .def("__repr__", &Action::repr);
+
+    py::class_<GenerateParam, shared_ptr<GenerateParam>>(m, "GenerateParam")
+        .def(py::init<size_t, size_t, size_t, size_t, float, float, float, float, float>(), "operation_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a);
 
     py::class_<Graph, shared_ptr<Graph>>(m, "Graph")
         .def(py::init<>())
@@ -66,9 +71,9 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("get_timestamp", &Graph::get_timestamp)
         .def("get_travel_time", &Graph::get_travel_time, "from"_a, "to"_a, "agv"_a)
         .def("add_path", &Graph::add_path, "a"_a, "b"_a)
-        .def("remove_path", &Graph::remove_path, "a"_a,"b"_a)
+        .def("remove_path", &Graph::remove_path, "a"_a, "b"_a)
         .def("calc_distance", &Graph::calc_distance)
-        .def_static("rand_generate", &Graph::rand_generate, "operation_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a)
+        .def_static("rand_generate", &Graph::rand_generate, "param"_a)
         .def("init", &Graph::init)
         .def("copy", &Graph::copy)
         .def("features", &Graph::features)
@@ -76,7 +81,6 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("finish_time_lower_bound", &Graph::finish_time_lower_bound)
         .def("get_available_actions", &Graph::get_available_actions)
         .def("act", &Graph::act, "action"_a)
-        .def("wait", &Graph::wait, "delta_time"_a)
         .def("__repr__", &Graph::repr)
         .def_readonly_static("begin_operation_id", &Graph::begin_operation_id)
         .def_readonly_static("end_operation_id", &Graph::end_operation_id)

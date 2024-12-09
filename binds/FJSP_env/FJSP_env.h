@@ -24,7 +24,7 @@ struct Product
 struct Operation
 {
     Operation(OperationId, MachineType, float);
-    string repr();
+    string repr() const;
 
     OperationId id;
     OperationStatus status;
@@ -41,7 +41,7 @@ struct Operation
 struct Machine
 {
     Machine(MachineId, MachineType, Position);
-    string repr();
+    string repr() const;
 
     MachineId id;
     MachineType type;
@@ -54,7 +54,7 @@ struct Machine
 struct AGV
 {
     AGV(AGVId, float, MachineId);
-    string repr();
+    string repr() const;
 
     AGVId id;
     AGVStatus status;
@@ -66,14 +66,28 @@ struct AGV
 
 struct Action
 {
+    Action(ActionType);
     Action(ActionType, AGVId, MachineId);
     Action(ActionType, AGVId, MachineId, Product);
-    string repr();
+    string repr() const;
 
     ActionType type;
-    AGVId act_AGV;
-    MachineId target_machine;
+    optional<AGVId> act_AGV;
+    optional<MachineId> target_machine;
     optional<Product> target_product;
+};
+
+struct GenerateParam
+{
+    size_t operation_count;
+    size_t machine_count;
+    size_t AGV_count;
+    size_t machine_type_count;
+    float min_transport_time;
+    float max_transport_time;
+    float min_max_speed_ratio;
+    float min_process_time;
+    float max_process_time;
 };
 
 struct GraphFeature;
@@ -96,7 +110,7 @@ public:
 
     Graph(const Graph &);
 
-    py::dict get_state();
+    py::dict get_state() const;
     static shared_ptr<Graph> from_state(py::dict);
 
     OperationId add_operation(MachineType, float);
@@ -104,40 +118,40 @@ public:
     void remove_relation(OperationId, OperationId);
     OperationId insert_operation(MachineType, float, optional<OperationId>, optional<OperationId>);
     void remove_operation(OperationId);
-    shared_ptr<Operation> get_operation(OperationId);
-    bool contains(OperationId);
+    shared_ptr<Operation> get_operation(OperationId) const;
+    bool contains(OperationId) const;
 
     MachineId add_machine(MachineType, Position);
-    shared_ptr<Machine> get_machine(MachineId);
+    shared_ptr<Machine> get_machine(MachineId) const;
 
     AGVId add_AGV(float, MachineId);
-    shared_ptr<AGV> get_AGV(AGVId);
+    shared_ptr<AGV> get_AGV(AGVId) const;
 
-    float get_timestamp();
+    float get_timestamp() const;
     void set_timestamp(float);
 
-    string repr();
+    string repr() const;
 
     void add_path(MachineId, MachineId);
     void remove_path(MachineId, MachineId);
     void calc_distance();
-    float get_travel_time(MachineId, MachineId, AGVId);
+    float get_travel_time(MachineId, MachineId, AGVId) const;
 
-    static shared_ptr<Graph> rand_generate(size_t, size_t, size_t, size_t, float, float, float, float, float);
+    static shared_ptr<Graph> rand_generate(GenerateParam);
 
     void init();
 
-    shared_ptr<Graph> copy();
+    shared_ptr<Graph> copy() const;
 
-    RepeatedTuple<float, operation_feature_size> get_operation_feature(shared_ptr<Operation>);
-    RepeatedTuple<float, machine_feature_size> get_machine_feature(shared_ptr<Machine>);
-    RepeatedTuple<float, AGV_feature_size> get_AGV_feature(shared_ptr<AGV>);
-    shared_ptr<GraphFeature> features();
+    RepeatedTuple<float, operation_feature_size> get_operation_feature(shared_ptr<Operation>) const;
+    RepeatedTuple<float, machine_feature_size> get_machine_feature(shared_ptr<Machine>) const;
+    RepeatedTuple<float, AGV_feature_size> get_AGV_feature(shared_ptr<AGV>) const;
+    shared_ptr<GraphFeature> features() const;
 
-    bool finished();
-    double finish_time_lower_bound();
+    bool finished() const;
+    float finish_time_lower_bound() const;
 
-    vector<Action> get_available_actions();
+    vector<Action> get_available_actions() const;
 
     bool operation_time_compare(OperationId, OperationId);
     bool AGV_time_compare(AGVId, AGVId);
@@ -145,12 +159,11 @@ public:
     void act_move(AGVId, MachineId);
     void act_pick(AGVId, MachineId, Product);
     void act_transport(AGVId, MachineId);
-    shared_ptr<Graph> act(Action);
+    void act_wait();
+    shared_ptr<Graph> act(Action) const;
 
     void wait_operation();
     void wait_AGV();
-    void _wait(float);
-    shared_ptr<Graph> wait(float);
 
 protected:
     OperationId next_operation_id;
@@ -169,8 +182,6 @@ protected:
 
     ProcessingOperationQueue processing_operations;
     MovingAGVQueue moving_AGVs;
-
-    optional<vector<Action>> available_actions;
 };
 
 struct GraphFeature
@@ -179,9 +190,9 @@ struct GraphFeature
     vector<tuple<size_t, size_t>> predecessor_idx; // predecessor_idx, successor_idx;
     vector<tuple<size_t, size_t>> successor_idx;   // successor_idx, predecessor_idx
     vector<RepeatedTuple<float, Graph::machine_feature_size>> machine_features;
-    vector<tuple<size_t, size_t>> processable_idx; // machine_idx, operation_idx
-    vector<tuple<size_t, size_t, float>> processing;  // machine_idx, operation_idx, rest_time
-    vector<tuple<size_t, size_t, size_t, size_t>> waiting;     // machine_idx, operation_idx, total, current
+    vector<tuple<size_t, size_t>> processable_idx;         // machine_idx, operation_idx
+    vector<tuple<size_t, size_t, float>> processing;       // machine_idx, operation_idx, rest_time
+    vector<tuple<size_t, size_t, size_t, size_t>> waiting; // machine_idx, operation_idx, total, current
     vector<RepeatedTuple<float, Graph::AGV_feature_size>> AGV_features;
     vector<tuple<size_t, size_t>> AGV_position;       // AGV_idx, machine_idx
     vector<tuple<size_t, size_t, float>> AGV_target;  // AGV_idx, machine_idx, rest_time

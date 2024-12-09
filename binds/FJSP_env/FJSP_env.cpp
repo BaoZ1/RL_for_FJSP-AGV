@@ -42,7 +42,7 @@ Operation::Operation(OperationId id, MachineType mt, float pt) : id(id),
 {
 }
 
-string Operation::repr()
+string Operation::repr() const
 {
     stringstream ss;
     if (this->status != OperationStatus::processing)
@@ -70,7 +70,7 @@ Machine::Machine(MachineId id, MachineType tp, Position pos) : id(id),
 {
 }
 
-string Machine::repr()
+string Machine::repr() const
 {
     return format("<machine (id: {}, type: {}, status: {}, working: {}, waiting: {})>",
                   this->id, this->type, enum_string(this->status), o2s(this->working_operation), o2s(this->waiting_operation));
@@ -87,7 +87,7 @@ AGV::AGV(AGVId id, float speed, MachineId init_pos) : id(id),
 {
 }
 
-string AGV::repr()
+string AGV::repr() const
 {
     switch (this->status)
     {
@@ -103,9 +103,14 @@ string AGV::repr()
     }
 }
 
+Action::Action(ActionType type) : type(type), act_AGV(nullopt), target_machine(nullopt), target_product(nullopt)
+{
+    assert(type == ActionType::wait);
+}
+
 Action::Action(ActionType type, AGVId AGV, MachineId machine) : type(type), act_AGV(AGV), target_machine(machine), target_product(nullopt)
 {
-    assert(type != ActionType::pick);
+    assert(type == ActionType::move || type == ActionType::transport);
 }
 
 Action::Action(ActionType type, AGVId AGV, MachineId machine, Product product) : type(type), act_AGV(AGV), target_machine(machine), target_product(product)
@@ -113,32 +118,35 @@ Action::Action(ActionType type, AGVId AGV, MachineId machine, Product product) :
     assert(type == ActionType::pick);
 }
 
-string Action::repr()
+string Action::repr() const
 {
-    if (this->type == ActionType::pick)
+    switch (this->type)
     {
-        return format("<Action (type: {}, AGV_id: {}, target_machine: {}, target_product: {})>",
-                      enum_string(this->type), this->act_AGV, this->target_machine, o2s(this->target_product));
-    }
-    else
-    {
+    case ActionType::move:
+    case ActionType::transport:
         return format("<Action (type: {}, AGV_id: {}, target_machine: {})>",
-                      enum_string(this->type), this->act_AGV, this->target_machine);
-    }
+                      enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine));
+    case ActionType::pick:
+        return format("<Action (type: {}, AGV_id: {}, target_machine: {}, target_product: {})>",
+                      enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine), o2s(this->target_product));
+    case ActionType::wait:
+        return format("<Action (type: {})>", enum_string(this->type));
+    };
+    assert(false);
+    return format("<Action (type: ERROR)>");
 }
 
 Graph::Graph() : inited(false),
                  timestamp(0),
                  processing_operations(ProcessingOperationQueue(bind(&Graph::operation_time_compare, this, ph::_1, ph::_2))),
-                 moving_AGVs(MovingAGVQueue(bind(&Graph::AGV_time_compare, this, ph::_1, ph::_2))),
-                 available_actions(nullopt)
+                 moving_AGVs(MovingAGVQueue(bind(&Graph::AGV_time_compare, this, ph::_1, ph::_2)))
 {
     this->operations[this->begin_operation_id] = make_shared<Operation>(this->begin_operation_id, this->dummy_machine_type, 0.0f);
     this->operations[this->end_operation_id] = make_shared<Operation>(this->end_operation_id, this->dummy_machine_type, 0.0f);
     this->add_relation(this->begin_operation_id, this->end_operation_id);
 
     this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type, Position{0, 0});
-    auto&& dummy_path_row = this->paths.emplace(this->dummy_machine_id, map<MachineId, vector<MachineId>>()).first->second;
+    auto &&dummy_path_row = this->paths.emplace(this->dummy_machine_id, map<MachineId, vector<MachineId>>()).first->second;
     dummy_path_row.emplace(this->dummy_machine_id, vector<MachineId>{this->dummy_machine_id});
 
     this->next_operation_id = 1;
@@ -147,8 +155,7 @@ Graph::Graph() : inited(false),
 }
 
 Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueue(bind(&Graph::operation_time_compare, this, ph::_1, ph::_2))),
-                                   moving_AGVs(MovingAGVQueue(bind(&Graph::AGV_time_compare, this, ph::_1, ph::_2))),
-                                   available_actions(nullopt)
+                                   moving_AGVs(MovingAGVQueue(bind(&Graph::AGV_time_compare, this, ph::_1, ph::_2)))
 {
     for (auto [id, ptr] : other.operations)
     {
@@ -177,7 +184,7 @@ Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueu
     this->moving_AGVs.set_data(other.moving_AGVs.get_data());
 }
 
-py::dict Graph::get_state()
+py::dict Graph::get_state() const
 {
     vector<py::dict> operation_dict;
     for (auto operation : this->operations | views::values)
@@ -361,17 +368,17 @@ void Graph::add_relation(OperationId from, OperationId to)
 {
     assert(this->contains(from));
     assert(this->contains(to));
-    auto p_node = this->operations[from];
-    auto s_node = this->operations[to];
+    auto p_node = this->operations.at(from);
+    auto s_node = this->operations.at(to);
     if (p_node->successors.size() == 1 && p_node->successors.contains(this->end_operation_id))
     {
         p_node->successors.clear();
-        this->operations[this->end_operation_id]->predecessors.erase(p_node->id);
+        this->operations.at(this->end_operation_id)->predecessors.erase(p_node->id);
     }
     if (s_node->predecessors.size() == 1 && s_node->predecessors.contains(this->begin_operation_id))
     {
         s_node->predecessors.clear();
-        this->operations[this->begin_operation_id]->successors.erase(s_node->id);
+        this->operations.at(this->begin_operation_id)->successors.erase(s_node->id);
     }
     p_node->successors.emplace(s_node->id);
     s_node->predecessors.emplace(p_node->id);
@@ -381,19 +388,19 @@ void Graph::remove_relation(OperationId from, OperationId to)
 {
     assert(this->contains(from));
     assert(this->contains(to));
-    auto p_node = this->operations[from];
-    auto s_node = this->operations[to];
+    auto p_node = this->operations.at(from);
+    auto s_node = this->operations.at(to);
     p_node->successors.erase(s_node->id);
     s_node->predecessors.erase(p_node->id);
     if (p_node->successors.empty())
     {
         p_node->successors.emplace(this->end_operation_id);
-        this->operations[this->end_operation_id]->predecessors.emplace(p_node->id);
+        this->operations.at(this->end_operation_id)->predecessors.emplace(p_node->id);
     }
     if (s_node->predecessors.empty())
     {
         s_node->predecessors.emplace(this->begin_operation_id);
-        this->operations[this->begin_operation_id]->successors.emplace(s_node->id);
+        this->operations.at(this->begin_operation_id)->successors.emplace(s_node->id);
     }
 }
 
@@ -406,25 +413,25 @@ OperationId Graph::insert_operation(
     assert(!(predecessor.has_value() && successor.has_value()));
     if (this->operations.size() == 2)
     {
-        assert(this->operations[this->begin_operation_id]->successors.size() == 1);
-        assert(this->operations[this->begin_operation_id]->successors.contains(this->end_operation_id));
-        assert(this->operations[this->end_operation_id]->predecessors.size() == 1);
-        assert(this->operations[this->end_operation_id]->predecessors.contains(this->begin_operation_id));
+        assert(this->operations.at(this->begin_operation_id)->successors.size() == 1);
+        assert(this->operations.at(this->begin_operation_id)->successors.contains(this->end_operation_id));
+        assert(this->operations.at(this->end_operation_id)->predecessors.size() == 1);
+        assert(this->operations.at(this->end_operation_id)->predecessors.contains(this->begin_operation_id));
 
-        this->operations[this->begin_operation_id]->successors.clear();
-        this->operations[this->end_operation_id]->predecessors.clear();
+        this->operations.at(this->begin_operation_id)->successors.clear();
+        this->operations.at(this->end_operation_id)->predecessors.clear();
     }
     auto node = make_shared<Operation>(this->next_operation_id++, type, process_time);
     this->operations[node->id] = node;
     if (predecessor.has_value())
     {
         node->predecessors = {predecessor.value()};
-        auto p_node = this->operations[predecessor.value()];
+        auto p_node = this->operations.at(predecessor.value());
         node->successors = p_node->successors;
         p_node->successors = {node->id};
         for (auto s_id : node->successors)
         {
-            auto s_node = this->operations[s_id];
+            auto s_node = this->operations.at(s_id);
             s_node->predecessors.erase(p_node->id);
             s_node->predecessors.emplace(node->id);
         }
@@ -432,12 +439,12 @@ OperationId Graph::insert_operation(
     else if (successor.has_value())
     {
         node->successors = {successor.value()};
-        auto s_node = this->operations[successor.value()];
+        auto s_node = this->operations.at(successor.value());
         node->predecessors = s_node->predecessors;
         s_node->predecessors = {node->id};
         for (auto p_id : node->predecessors)
         {
-            auto p_node = this->operations[p_id];
+            auto p_node = this->operations.at(p_id);
             p_node->successors.erase(s_node->id);
             p_node->successors.emplace(node->id);
         }
@@ -446,8 +453,8 @@ OperationId Graph::insert_operation(
     {
         node->predecessors = {this->begin_operation_id};
         node->successors = {this->end_operation_id};
-        this->operations[this->begin_operation_id]->successors.emplace(node->id);
-        this->operations[this->end_operation_id]->predecessors.emplace(node->id);
+        this->operations.at(this->begin_operation_id)->successors.emplace(node->id);
+        this->operations.at(this->end_operation_id)->predecessors.emplace(node->id);
     }
 
     return node->id;
@@ -457,12 +464,12 @@ void Graph::remove_operation(OperationId id)
 {
     assert(id != this->begin_operation_id && id != this->end_operation_id);
 
-    auto node = this->operations[id];
+    auto node = this->operations.at(id);
     this->operations.erase(id);
     auto ps = node->predecessors | views::transform([this](OperationId p_id)
-                                                    { return this->operations[p_id]; });
+                                                    { return this->operations.at(p_id); });
     auto ss = node->successors | views::transform([this](OperationId s_id)
-                                                  { return this->operations[s_id]; });
+                                                  { return this->operations.at(s_id); });
     for (auto p_node : ps)
     {
         p_node->successors.erase(id);
@@ -488,22 +495,22 @@ void Graph::remove_operation(OperationId id)
     {
         assert(this->operations.contains(this->begin_operation_id));
         assert(this->operations.contains(this->end_operation_id));
-        assert(this->operations[this->begin_operation_id]->successors.empty());
-        assert(this->operations[this->end_operation_id]->predecessors.empty());
+        assert(this->operations.at(this->begin_operation_id)->successors.empty());
+        assert(this->operations.at(this->end_operation_id)->predecessors.empty());
 
-        this->operations[this->begin_operation_id]->successors = {this->end_operation_id};
-        this->operations[this->end_operation_id]->predecessors = {this->begin_operation_id};
+        this->operations.at(this->begin_operation_id)->successors = {this->end_operation_id};
+        this->operations.at(this->end_operation_id)->predecessors = {this->begin_operation_id};
     }
 }
 
-bool Graph::contains(OperationId id)
+bool Graph::contains(OperationId id) const
 {
     return this->operations.contains(id);
 }
 
-shared_ptr<Operation> Graph::get_operation(OperationId id)
+shared_ptr<Operation> Graph::get_operation(OperationId id) const
 {
-    return this->operations[id];
+    return this->operations.at(id);
 }
 
 MachineId Graph::add_machine(MachineType type, Position pos)
@@ -512,20 +519,20 @@ MachineId Graph::add_machine(MachineType type, Position pos)
     this->machines[node->id] = node;
     for (auto prev : this->paths | views::values)
     {
-        prev[node->id] = {};
+        prev.emplace(node->id, vector<MachineId>{});
     }
-    auto&& new_row = this->paths.emplace(node->id, map<MachineId, vector<MachineId>>()).first->second;
+    auto &new_row = this->paths[node->id];
     for (auto id : this->machines | views::keys)
     {
-        new_row[id] = {};
+        new_row.emplace(id, vector<MachineId>{});
     }
-    new_row[node->id].emplace_back(node->id);
+    new_row.at(node->id).emplace_back(node->id);
     return node->id;
 }
 
-shared_ptr<Machine> Graph::get_machine(MachineId id)
+shared_ptr<Machine> Graph::get_machine(MachineId id) const
 {
-    return this->machines[id];
+    return this->machines.at(id);
 }
 
 AGVId Graph::add_AGV(float speed, MachineId init_pos)
@@ -536,12 +543,12 @@ AGVId Graph::add_AGV(float speed, MachineId init_pos)
     return new_AGV->id;
 }
 
-shared_ptr<AGV> Graph::get_AGV(AGVId id)
+shared_ptr<AGV> Graph::get_AGV(AGVId id) const
 {
-    return this->AGVs[id];
+    return this->AGVs.at(id);
 }
 
-float Graph::get_timestamp()
+float Graph::get_timestamp() const
 {
     return this->timestamp;
 }
@@ -551,7 +558,7 @@ void Graph::set_timestamp(float value)
     this->timestamp = value;
 }
 
-string Graph::repr()
+string Graph::repr() const
 {
     stringstream ss;
     ss << format("<job (inited: {}, timestamp: {:.2f})", this->inited, this->timestamp);
@@ -581,7 +588,7 @@ string Graph::repr()
         ss << format("\n{:^6}", from);
         for (auto &&[to, _] : this->machines)
         {
-            ss << format("{:^6.2f}", this->distances[from][to]);
+            ss << format("{:^6.2f}", this->distances.at(from).at(to));
         }
     }
     ss << "\n>";
@@ -591,17 +598,17 @@ string Graph::repr()
 void Graph::add_path(MachineId a, MachineId b)
 {
     this->distances.clear();
-    this->paths[a][b] = {b};
-    this->paths[b][a] = {a};
+    this->paths[a].emplace(b, vector<MachineId>{b});
+    this->paths[b].emplace(a, vector<MachineId>{a});
 }
 
 void Graph::remove_path(MachineId a, MachineId b)
 {
-    assert(this->paths[a][b] == vector<MachineId>{b});
-    assert(this->paths[b][a] == vector<MachineId>{a});
+    assert(this->paths.at(a).at(b) == vector<MachineId>{b});
+    assert(this->paths.at(b).at(a) == vector<MachineId>{a});
     this->distances.clear();
-    this->paths[a][b].clear();
-    this->paths[b][a].clear();
+    this->paths.at(a).at(b).clear();
+    this->paths.at(b).at(a).clear();
 }
 
 void Graph::calc_distance()
@@ -609,26 +616,23 @@ void Graph::calc_distance()
     this->distances.clear();
     for (auto f_id : this->machines | views::keys)
     {
-        auto&& dist_row = this->distances.emplace(f_id, map<MachineId, float>()).first->second;
         for (auto t_id : this->machines | views::keys)
         {
-            dist_row.emplace(t_id, numeric_limits<float>::infinity() / 3);
-        }
-    }
-    for (auto id : this->machines | views::keys)
-    {
-        this->distances[id][id] = 0;
-    }
-    for (auto [f_id, tos] : this->paths)
-    {
-        for (auto [t_id, path] : tos)
-        {
-            if (path.size() == 1)
+            if(f_id == t_id)
             {
-                this->distances[f_id][t_id] = this->machines[f_id]->pos.distance(this->machines[t_id]->pos);
+                this->distances[f_id][t_id] = 0;
+            }
+            else if(this->paths[f_id][t_id].size() == 1)
+            {
+                this->distances[f_id][t_id] = this->machines.at(f_id)->pos.distance(this->machines.at(t_id)->pos);
+            }
+            else
+            {
+                this->distances[f_id][t_id] = numeric_limits<float>::infinity() / 3;
             }
         }
     }
+
     for (auto m_id : this->machines | views::keys)
     {
         for (auto f_id : this->machines | views::keys)
@@ -653,23 +657,14 @@ void Graph::calc_distance()
     }
 }
 
-float Graph::get_travel_time(MachineId from, MachineId to, AGVId agv)
+float Graph::get_travel_time(MachineId from, MachineId to, AGVId agv) const
 {
-    return this->distances[from][to] / this->AGVs[agv]->speed;
+    return this->distances.at(from).at(to) / this->AGVs.at(agv)->speed;
 }
 
-shared_ptr<Graph> Graph::rand_generate(
-    size_t operation_count,
-    size_t machine_count,
-    size_t AGV_count,
-    size_t machine_type_count,
-    float min_transport_time,
-    float max_transport_time,
-    float min_max_speed_ratio,
-    float min_process_time,
-    float max_process_time)
+shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
 {
-    if (machine_count < machine_type_count)
+    if (param.machine_count < param.machine_type_count)
     {
         throw py::value_error();
     }
@@ -678,7 +673,7 @@ shared_ptr<Graph> Graph::rand_generate(
     mt19937 engine(random_device{}());
 
     MachineType min_machine_type = Graph::dummy_machine_type + 1;
-    MachineType max_machine_type = Graph::dummy_machine_type + machine_type_count;
+    MachineType max_machine_type = Graph::dummy_machine_type + param.machine_type_count;
     uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
     uniform_real_distribution<float> machine_pos_x_dist(5, 50);
     uniform_real_distribution<float> machine_pos_y_dist(5, 50);
@@ -689,7 +684,7 @@ shared_ptr<Graph> Graph::rand_generate(
         Position pos{machine_pos_x_dist(engine), machine_pos_y_dist(engine)};
         machines.emplace_back(ret->add_machine(t, pos));
     }
-    for (size_t i = machine_type_count; i < machine_count; i++)
+    for (size_t i = param.machine_type_count; i < param.machine_count; i++)
     {
         Position pos{machine_pos_x_dist(engine), machine_pos_y_dist(engine)};
         machines.emplace_back(ret->add_machine(machine_type_dist(engine), pos));
@@ -699,19 +694,21 @@ shared_ptr<Graph> Graph::rand_generate(
     UnionFind<MachineId> uf(machines);
     while (uf.count() != 1)
     {
-        MachineId a = machines[machine_idx_dist(engine)];
-        MachineId b = machines[machine_idx_dist(engine)];
+        MachineId a = machines.at(machine_idx_dist(engine));
+        MachineId b = machines.at(machine_idx_dist(engine));
+
         if (!ret->paths[a][b].empty())
         {
             continue;
         }
+
         ret->add_path(a, b);
         uf.unite(a, b);
     }
     ret->calc_distance();
     float min_dist = numeric_limits<float>::max();
     float max_dist = numeric_limits<float>::min();
-    DEBUG_OUT("min: {}, max: {}", min_dist, max_dist);
+
     for (auto [f_id, tos] : ret->distances)
     {
         for (auto [t_id, dist] : tos)
@@ -724,17 +721,17 @@ shared_ptr<Graph> Graph::rand_generate(
             max_dist = max(max_dist, dist);
         }
     }
-    float min_speed = max_dist / max_transport_time;
-    uniform_real_distribution AGV_speed_dist(min_speed, min_speed / min_max_speed_ratio);
-    for (size_t i = 0; i < AGV_count; i++)
+    float min_speed = max_dist / param.max_transport_time;
+    uniform_real_distribution AGV_speed_dist(min_speed, min_speed / param.min_max_speed_ratio);
+    for (size_t i = 0; i < param.AGV_count; i++)
     {
         ret->add_AGV(AGV_speed_dist(engine), Graph::dummy_machine_id);
     }
 
-    uniform_real_distribution<float> process_time_dist(min_process_time, max_process_time);
+    uniform_real_distribution<float> process_time_dist(param.min_process_time, param.max_process_time);
     discrete_distribution<size_t> prev_count_dist({3, 6, 2, 1});
     set<OperationId> exist_ids;
-    for (size_t i = 0; i < operation_count; i++)
+    for (size_t i = 0; i < param.operation_count; i++)
     {
         OperationId new_id = ret->add_operation(machine_type_dist(engine), process_time_dist(engine));
         for (auto p_id : random_unique(exist_ids, min(prev_count_dist(engine), exist_ids.size())))
@@ -750,24 +747,25 @@ shared_ptr<Graph> Graph::rand_generate(
 void Graph::init()
 {
     assert(!this->inited);
-    auto begin_operation = this->operations[this->begin_operation_id];
+    auto begin_operation = this->operations.at(this->begin_operation_id);
     begin_operation->status = OperationStatus::finished;
-    auto dummy_machine = this->machines[this->dummy_machine_id];
+    auto dummy_machine = this->machines.at(this->dummy_machine_id);
     for (OperationId id : begin_operation->successors)
     {
-        this->operations[id]->status = OperationStatus::unscheduled;
+        this->operations.at(id)->status = OperationStatus::unscheduled;
         dummy_machine->products.emplace(Product{this->begin_operation_id, id});
     }
-    this->operations[this->end_operation_id]->status = OperationStatus::blocked;
+    this->operations.at(this->end_operation_id)->status = OperationStatus::blocked;
+    this->timestamp = 0;
     this->inited = true;
 }
 
-shared_ptr<Graph> Graph::copy()
+shared_ptr<Graph> Graph::copy() const
 {
     return make_shared<Graph>(*this);
 }
 
-RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature(shared_ptr<Operation> operation)
+RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature(shared_ptr<Operation> operation) const
 {
     float status_is_blocked = operation->status == OperationStatus::blocked ? 1.0 : 0.0;
     float status_is_waiting = operation->status == OperationStatus::waiting ? 1.0 : 0.0;
@@ -794,14 +792,14 @@ RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature
         rest_pruduct};
 }
 
-RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(shared_ptr<Machine> machine)
+RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(shared_ptr<Machine> machine) const
 {
     float status_is_idle = machine->status == MachineStatus::idle;
     float status_is_waiting_material = machine->status == MachineStatus::waiting_material;
     float status_is_working = machine->status == MachineStatus::working;
 
     float rest_process_time = machine->status == MachineStatus::working
-                                  ? (this->operations[machine->waiting_operation.value()]->finish_timestamp - this->timestamp)
+                                  ? (this->operations.at(machine->waiting_operation.value())->finish_timestamp - this->timestamp)
                                   : 0;
 
     float same_type_count = ranges::count_if(this->machines | views::values, [this, machine](auto other)
@@ -821,7 +819,7 @@ RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(sha
         processable_operation_count,
         rest_processable_operation_count};
 }
-RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<AGV> AGV)
+RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<AGV> AGV) const
 {
     float status_is_idle = AGV->status == AGVStatus::idle;
     float status_is_moving = AGV->status == AGVStatus::moving;
@@ -837,7 +835,7 @@ RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<
             rest_act_time};
 }
 
-shared_ptr<GraphFeature> Graph::features()
+shared_ptr<GraphFeature> Graph::features() const
 {
     assert(this->inited);
 
@@ -863,13 +861,13 @@ shared_ptr<GraphFeature> Graph::features()
 
         if (machine->working_operation.has_value())
         {
-            auto operation = this->operations[machine->working_operation.value()];
-            ret->processing.emplace_back(i, operation_id_idx_mapper[operation->id], operation->finish_timestamp - this->timestamp);
+            auto operation = this->operations.at(machine->working_operation.value());
+            ret->processing.emplace_back(i, operation_id_idx_mapper.at(operation->id), operation->finish_timestamp - this->timestamp);
         }
         if (machine->waiting_operation.has_value())
         {
-            auto operation = this->operations[machine->waiting_operation.value()];
-            ret->waiting.emplace_back(i, operation_id_idx_mapper[machine->waiting_operation.value()], operation->predecessors.size(), operation->arrived_preds.size());
+            auto operation = this->operations.at(machine->waiting_operation.value());
+            ret->waiting.emplace_back(i, operation_id_idx_mapper.at(machine->waiting_operation.value()), operation->predecessors.size(), operation->arrived_preds.size());
         }
     }
 
@@ -877,11 +875,11 @@ shared_ptr<GraphFeature> Graph::features()
     {
         for (auto p_id : operation->predecessors)
         {
-            ret->predecessor_idx.emplace_back(i, operation_id_idx_mapper[p_id]);
+            ret->predecessor_idx.emplace_back(i, operation_id_idx_mapper.at(p_id));
         }
         for (auto s_id : operation->successors)
         {
-            ret->successor_idx.emplace_back(i, operation_id_idx_mapper[s_id]);
+            ret->successor_idx.emplace_back(i, operation_id_idx_mapper.at(s_id));
         }
         for (auto [m_id, m] : machine_with_idx)
         {
@@ -899,29 +897,29 @@ shared_ptr<GraphFeature> Graph::features()
         ret->AGV_features[i] = Graph::get_AGV_feature(AGV);
         if (AGV->status == AGVStatus::idle)
         {
-            ret->AGV_position.emplace_back(i, machine_id_idx_mapper[AGV->position]);
+            ret->AGV_position.emplace_back(i, machine_id_idx_mapper.at(AGV->position));
         }
         else
         {
             auto t = AGV->finish_timestamp - this->timestamp;
-            ret->AGV_target.emplace_back(i, machine_id_idx_mapper[AGV->target_machine], t);
+            ret->AGV_target.emplace_back(i, machine_id_idx_mapper.at(AGV->target_machine), t);
         }
         if (AGV->loaded_item.has_value())
         {
             auto p = AGV->loaded_item.value();
-            ret->AGV_loaded.emplace_back(i, operation_id_idx_mapper[p.from], operation_id_idx_mapper[p.to]);
+            ret->AGV_loaded.emplace_back(i, operation_id_idx_mapper.at(p.from), operation_id_idx_mapper.at(p.to));
         }
     }
 
     return ret;
 }
 
-bool Graph::finished()
+bool Graph::finished() const
 {
-    return this->operations[this->end_operation_id]->status == OperationStatus::finished;
+    return this->operations.at(this->end_operation_id)->status == OperationStatus::finished;
 }
 
-double Graph::finish_time_lower_bound()
+float Graph::finish_time_lower_bound() const
 {
     map<MachineType, float> remain_process_time;
     float remain_transport_distance = 0;
@@ -932,7 +930,7 @@ double Graph::finish_time_lower_bound()
     {
         for (auto [tid, to] : this->machines)
         {
-            float distance = this->distances[fid][tid];
+            float distance = this->distances.at(fid).at(tid);
             auto [iter, new_add] = min_type_distance.try_emplace({from->type, to->type}, distance);
             if (!new_add)
             {
@@ -957,7 +955,7 @@ double Graph::finish_time_lower_bound()
         set<OperationId> unarrived_pred_ids;
         ranges::set_difference(operation->predecessors, operation->arrived_preds, inserter(unarrived_pred_ids, unarrived_pred_ids.end()));
         for (auto unarrived_pred : unarrived_pred_ids | views::transform([this](auto id)
-                                                                         { return this->operations[id]; }))
+                                                                         { return this->operations.at(id); }))
         {
             if (!unarrived_pred->sent_succs.contains(operation->id))
             {
@@ -977,7 +975,7 @@ double Graph::finish_time_lower_bound()
     float max_time = 0;
     for (auto [type, total_time] : remain_process_time)
     {
-        max_time = max(max_time, total_time / type_count[type]);
+        max_time = max(max_time, total_time / type_count.at(type));
     }
 
     float total_speed = 0;
@@ -990,14 +988,9 @@ double Graph::finish_time_lower_bound()
     return this->timestamp + max_time;
 }
 
-vector<Action> Graph::get_available_actions()
+vector<Action> Graph::get_available_actions() const
 {
     assert(this->inited);
-
-    if (this->available_actions.has_value())
-    {
-        return this->available_actions.value();
-    }
 
     vector<Action> ret;
 
@@ -1030,10 +1023,10 @@ vector<Action> Graph::get_available_actions()
         }
         if (AGV->loaded_item.has_value())
         {
-            auto operation = this->operations[AGV->loaded_item->to];
+            auto operation = this->operations.at(AGV->loaded_item->to);
             if (operation->processing_machine.has_value())
             {
-                auto machine = this->machines[operation->processing_machine.value()];
+                auto machine = this->machines.at(operation->processing_machine.value());
                 assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
                 assert(operation->machine_type == machine->type);
                 ret.emplace_back(ActionType::transport, AGV_id, machine->id);
@@ -1066,54 +1059,54 @@ vector<Action> Graph::get_available_actions()
             ret.emplace_back(ActionType::move, AGV_id, machine_id);
         }
     }
-    this->available_actions = ret;
+
     return ret;
 }
 
 bool Graph::operation_time_compare(OperationId a, OperationId b)
 {
-    return this->operations[a]->finish_timestamp > this->operations[b]->finish_timestamp;
+    return this->operations.at(a)->finish_timestamp > this->operations.at(b)->finish_timestamp;
 }
 
 bool Graph::AGV_time_compare(AGVId a, AGVId b)
 {
-    return this->AGVs[a]->finish_timestamp > this->AGVs[b]->finish_timestamp;
+    return this->AGVs.at(a)->finish_timestamp > this->AGVs.at(b)->finish_timestamp;
 }
 
 void Graph::act_move(AGVId id, MachineId target)
 {
-    auto AGV = this->AGVs[id];
+    auto AGV = this->AGVs.at(id);
     assert(AGV->status == AGVStatus::idle);
     AGV->target_machine = target;
     AGV->status = AGVStatus::moving;
-    AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
     this->moving_AGVs.push(id);
 }
 
 void Graph::act_pick(AGVId id, MachineId target, Product product)
 {
-    auto AGV = this->AGVs[id];
+    auto AGV = this->AGVs.at(id);
     assert(AGV->status == AGVStatus::idle && !AGV->loaded_item.has_value());
 
-    auto target_machine = this->machines[target];
+    auto target_machine = this->machines.at(target);
     assert(target_machine->products.contains(product));
 
-    auto transport_operation = this->operations[product.to];
+    auto transport_operation = this->operations.at(product.to);
 
     AGV->target_machine = target;
     AGV->target_item = product;
     AGV->status = AGVStatus::picking;
-    AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
     this->moving_AGVs.push(id);
 }
 
 void Graph::act_transport(AGVId id, MachineId target)
 {
-    auto AGV = this->AGVs[id];
+    auto AGV = this->AGVs.at(id);
     assert(AGV->status == AGVStatus::idle && AGV->loaded_item.has_value());
     auto product = AGV->loaded_item.value();
-    auto target_machine = this->machines[target];
-    auto target_operation = this->operations[product.to];
+    auto target_machine = this->machines.at(target);
+    auto target_operation = this->operations.at(product.to);
     assert(target_operation->predecessors.contains(AGV->loaded_item->from));
     assert(target_operation->machine_type == target_machine->type);
 
@@ -1149,12 +1142,42 @@ void Graph::act_transport(AGVId id, MachineId target)
 
     AGV->target_machine = target;
     AGV->status = AGVStatus::transporting;
-    AGV->finish_timestamp = this->timestamp + this->distances[AGV->position][target] / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
 
     this->moving_AGVs.push(id);
 }
 
-shared_ptr<Graph> Graph::act(Action action)
+void Graph::act_wait()
+{
+    float nearest_operation_finish_time = numeric_limits<float>::max();
+    float nearest_AGV_finish_time = numeric_limits<float>::max();
+
+    if (!this->processing_operations.empty())
+    {
+        nearest_operation_finish_time = this->operations.at(this->processing_operations.top())->finish_timestamp;
+    }
+
+    if (!this->moving_AGVs.empty())
+    {
+        nearest_AGV_finish_time = this->AGVs.at(this->moving_AGVs.top())->finish_timestamp;
+    }
+
+    if (nearest_operation_finish_time != numeric_limits<float>::max() &&
+        nearest_operation_finish_time <= nearest_AGV_finish_time)
+    {
+        wait_operation();
+    }
+    else if (nearest_AGV_finish_time != numeric_limits<float>::max())
+    {
+        wait_AGV();
+    }
+    else
+    {
+        assert(false);
+    }
+}
+
+shared_ptr<Graph> Graph::act(Action action) const
 {
     assert(this->inited);
 
@@ -1162,16 +1185,18 @@ shared_ptr<Graph> Graph::act(Action action)
     switch (action.type)
     {
     case ActionType::move:
-        ret->act_move(action.act_AGV, action.target_machine);
+        ret->act_move(action.act_AGV.value(), action.target_machine.value());
         break;
 
     case ActionType::pick:
-        ret->act_pick(action.act_AGV, action.target_machine, action.target_product.value());
+        ret->act_pick(action.act_AGV.value(), action.target_machine.value(), action.target_product.value());
         break;
 
     case ActionType::transport:
-        ret->act_transport(action.act_AGV, action.target_machine);
+        ret->act_transport(action.act_AGV.value(), action.target_machine.value());
         break;
+    case ActionType::wait:
+        ret->act_wait();
     default:
         assert(false);
     }
@@ -1180,13 +1205,13 @@ shared_ptr<Graph> Graph::act(Action action)
 
 void Graph::wait_operation()
 {
-    auto operation = this->operations[this->processing_operations.top()];
+    auto operation = this->operations.at(this->processing_operations.top());
     this->processing_operations.pop();
     assert(operation->status == OperationStatus::processing);
     assert(operation->processing_machine.has_value());
     this->timestamp = operation->finish_timestamp;
     operation->status = OperationStatus::finished;
-    auto machine = this->machines[operation->processing_machine.value()];
+    auto machine = this->machines.at(operation->processing_machine.value());
     assert(machine->status == MachineStatus::working);
     assert(machine->working_operation == operation->id);
     machine->status = MachineStatus::idle;
@@ -1194,10 +1219,10 @@ void Graph::wait_operation()
     for (auto s_id : operation->successors)
     {
         machine->products.emplace(Product{operation->id, s_id});
-        auto successor = this->operations[s_id];
+        auto successor = this->operations.at(s_id);
         assert(successor->status == OperationStatus::blocked);
         if (ranges::all_of(successor->predecessors, [this](auto p_id)
-                           { return this->operations[p_id]->status == OperationStatus::finished; }))
+                           { return this->operations.at(p_id)->status == OperationStatus::finished; }))
         {
             if (successor->processing_machine.has_value())
             {
@@ -1213,7 +1238,7 @@ void Graph::wait_operation()
     if (machine->waiting_operation.has_value())
     {
         machine->status = MachineStatus::waiting_material;
-        auto operation = this->operations[machine->waiting_operation.value()];
+        auto operation = this->operations.at(machine->waiting_operation.value());
         assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
         if (operation->status == OperationStatus::waiting && ranges::all_of(operation->predecessors, [machine](auto id)
                                                                             { return machine->materials.contains(Product{id, machine->waiting_operation.value()}); }))
@@ -1234,7 +1259,7 @@ void Graph::wait_operation()
 
 void Graph::wait_AGV()
 {
-    auto AGV = this->AGVs[this->moving_AGVs.top()];
+    auto AGV = this->AGVs.at(this->moving_AGVs.top());
     this->moving_AGVs.pop();
 
     this->timestamp = AGV->finish_timestamp;
@@ -1251,9 +1276,9 @@ void Graph::wait_AGV()
     {
         assert(AGV->target_item.has_value());
         assert(!AGV->loaded_item.has_value());
-        auto target_machine = this->machines[AGV->target_machine];
+        auto target_machine = this->machines.at(AGV->target_machine);
         assert(target_machine->products.contains(AGV->target_item.value()));
-        auto operation = this->operations[AGV->target_item->from];
+        auto operation = this->operations.at(AGV->target_item->from);
         assert(operation->status == OperationStatus::finished);
         assert(operation->successors.contains(AGV->target_item->to));
         assert(!operation->sent_succs.contains(AGV->target_item->to));
@@ -1272,10 +1297,10 @@ void Graph::wait_AGV()
     case AGVStatus::transporting:
     {
         assert(AGV->loaded_item.has_value());
-        auto machine = this->machines[AGV->target_machine];
+        auto machine = this->machines.at(AGV->target_machine);
         assert(machine->waiting_operation == AGV->loaded_item->to);
         assert(machine->status == MachineStatus::waiting_material || machine->status == MachineStatus::working);
-        auto operation = this->operations[AGV->loaded_item->to];
+        auto operation = this->operations.at(AGV->loaded_item->to);
         assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
         assert(operation->machine_type == machine->type);
         assert(operation->predecessors.contains(AGV->loaded_item->from));
@@ -1311,39 +1336,4 @@ void Graph::wait_AGV()
     default:
         throw logic_error(format("wrong AGV status: {}", enum_string(AGV->status)));
     }
-}
-
-void Graph::_wait(float delta_time)
-{
-    float nearest_operation_finish_time = DBL_MAX;
-    float nearest_AGV_finish_time = DBL_MAX;
-    if (!this->processing_operations.empty())
-    {
-        nearest_operation_finish_time = this->operations[this->processing_operations.top()]->finish_timestamp;
-    }
-
-    if (!this->moving_AGVs.empty())
-    {
-        nearest_AGV_finish_time = this->AGVs[this->moving_AGVs.top()]->finish_timestamp;
-    }
-
-    if (nearest_operation_finish_time <= this->timestamp + delta_time)
-    {
-        wait_operation();
-    }
-    else if (nearest_AGV_finish_time <= this->timestamp + delta_time)
-    {
-        wait_AGV();
-    }
-    else
-    {
-        this->timestamp += delta_time;
-    }
-}
-
-shared_ptr<Graph> Graph::wait(float delta_time)
-{
-    auto ret = this->copy();
-    ret->_wait(delta_time);
-    return ret;
 }
