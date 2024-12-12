@@ -1,6 +1,3 @@
-#ifndef UTILS_H
-#define UTILS_H
-
 #include <string>
 #include <ranges>
 #include <sstream>
@@ -11,15 +8,9 @@
 #include <concepts>
 #include <execution>
 
-#include "FJSP_env.h"
+#include "utils.h"
 
 using namespace std;
-
-#ifdef NDEBUG
-#define DEBUG_OUT(...) (void)0
-#else
-#define DEBUG_OUT(...) std::cout << format(__VA_ARGS__) << std::endl
-#endif
 
 constexpr string enum_string(OperationStatus s)
 {
@@ -107,7 +98,7 @@ string id_set_string(const set<OperationId> &s)
     return ss.str();
 }
 
-string add_indent(const string &s, size_t indent_count = 1)
+string add_indent(const string &s, size_t indent_count)
 {
     stringstream oss(s), iss;
     string line;
@@ -161,7 +152,7 @@ string v2s(vector<T> vec)
 }
 
 template <typename T>
-string o2s(optional<T> o, string on_empty = "null")
+string o2s(optional<T> o, string on_empty)
 {
     if (o.has_value())
     {
@@ -170,13 +161,9 @@ string o2s(optional<T> o, string on_empty = "null")
     return on_empty;
 }
 
-template <typename T>
-concept reprable = requires(T x) {
-    { x.repr() } -> same_as<string>;
-};
 
 template <reprable T>
-string o2s(optional<T> o, string on_empty = "null")
+string o2s(optional<T> o, string on_empty)
 {
     if (o.has_value())
     {
@@ -185,14 +172,7 @@ string o2s(optional<T> o, string on_empty = "null")
     return on_empty;
 }
 
-template <class Container>
-concept iterable_container = requires(Container x) {
-    { x.begin() } -> input_or_output_iterator;
-    { x.end() } -> same_as<decltype(x.begin())>;
-    { *(x.end()) } -> same_as<decltype(*(x.begin()))>;
-};
-
-template <iterable_container Container, typename T = remove_cvref_t<decltype(*declval<Container>().begin())>>
+template <iterable_container Container, typename T>
 vector<T> random_unique(const Container &data, size_t num)
 {
     vector<T> cp(data.begin(), data.end());
@@ -212,4 +192,16 @@ vector<T> random_unique(const Container &data, size_t num)
     return cp;
 }
 
-#endif
+vector<shared_ptr<Graph>> batch_step(const vector<shared_ptr<Graph>> &envs, const vector<shared_ptr<Action>> &actions)
+{
+    auto pairs = views::zip(vector(envs), actions) | ranges::to<vector>();
+
+    for_each(execution::par_unseq,
+             pairs.begin(), pairs.end(),
+             [](tuple<shared_ptr<Graph>, shared_ptr<Action>> &item)
+             {
+                 auto &[env, action] = item;
+                 env = env->act(*action);
+             });
+    return pairs | views::elements<0> | ranges::to<vector>();
+}

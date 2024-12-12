@@ -1,4 +1,5 @@
-#pragma once
+#ifndef AUX_STRUCTS_H
+#define AUX_STRUCTS_H
 
 #include <tuple>
 #include <vector>
@@ -97,7 +98,7 @@ public:
         }
     }
 
-    T top()
+    T top() const
     {
         if (!data.empty())
         {
@@ -106,7 +107,7 @@ public:
         throw runtime_error("Empty priority queue");
     }
 
-    bool empty()
+    bool empty() const
     {
         return this->data.empty();
     }
@@ -169,3 +170,5 @@ private:
     map<int, T> backward_mapper;
     map<int, int> father;
 };
+
+#endif

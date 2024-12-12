@@ -3,30 +3,33 @@ import numpy as np
 from torch.utils.data import IterableDataset, DataLoader
 
 
-class ReplayBuffer:
-    def __init__(self):
-        self.buffer: list[tuple[GraphFeature, Action, float, bool, GraphFeature]] = []
+class ReplayBuffer[T]:
+    def __init__(self, max_len: int=1000):
+        self.buffer: list[tuple[T, Action, float, bool, T]] = []
+        self.max_len = max_len
 
     def append(
         self,
-        state: GraphFeature,
+        state: T,
         action: Action,
         reward: float,
         done: bool,
-        next_state: GraphFeature,
+        next_state: T,
     ):
         self.buffer.append((state, action, reward, done, next_state))
+        if len(self.buffer) > self.max_len:
+            self.buffer.pop(0)
 
     def sample(
         self, num
-    ) -> list[tuple[GraphFeature, Action, float, bool, GraphFeature]]:
+    ) -> list[tuple[T, Action, float, bool, T]]:
         assert len(self.buffer) > num
 
         return np.random.choice(self.buffer, num, False)
 
 
-class ReplayDataset(IterableDataset):
-    def __init__(self, buffer: ReplayBuffer, sample_size: int):
+class ReplayDataset[T](IterableDataset):
+    def __init__(self, buffer: ReplayBuffer[T], sample_size: int):
         super().__init__()
 
         self.buffer = buffer

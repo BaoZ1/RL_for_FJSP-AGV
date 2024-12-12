@@ -33,6 +33,8 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("__repr__", &Position::repr);
 
     py::class_<Product, shared_ptr<Product>>(m, "Product")
+        .def_readonly("operation_from", &Product::from)
+        .def_readonly("operation_to", &Product::to)
         .def("__repr__", &Product::repr);
 
     py::class_<Operation, shared_ptr<Operation>>(m, "Operation")
@@ -81,6 +83,7 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("finish_time_lower_bound", &Graph::finish_time_lower_bound)
         .def("get_available_actions", &Graph::get_available_actions)
         .def("act", &Graph::act, "action"_a)
+        .def_static("batch_step", &Graph::batch_step, "envs"_a, "actions"_a)
         .def("__repr__", &Graph::repr)
         .def_readonly_static("begin_operation_id", &Graph::begin_operation_id)
         .def_readonly_static("end_operation_id", &Graph::end_operation_id)
@@ -101,4 +104,9 @@ PYBIND11_MODULE(FJSP_env, m)
         .def_readonly("AGV_position", &GraphFeature::AGV_position)
         .def_readonly("AGV_target", &GraphFeature::AGV_target)
         .def_readonly("AGV_loaded", &GraphFeature::AGV_loaded);
+    
+    py::class_<IdIdxMapper, shared_ptr<IdIdxMapper>>(m, "IdIdxMapper")
+        .def_readonly("operation", &IdIdxMapper::operation)
+        .def_readonly("machine", &IdIdxMapper::machine)
+        .def_readonly("AGV", &IdIdxMapper::AGV);
 }

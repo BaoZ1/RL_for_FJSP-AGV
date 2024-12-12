@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FJSP_ENV_H
+#define FJSP_ENV_H
 
 #include <string>
 #include <sstream>
@@ -91,6 +92,7 @@ struct GenerateParam
 };
 
 struct GraphFeature;
+struct IdIdxMapper;
 
 class Graph
 {
@@ -146,7 +148,7 @@ public:
     RepeatedTuple<float, operation_feature_size> get_operation_feature(shared_ptr<Operation>) const;
     RepeatedTuple<float, machine_feature_size> get_machine_feature(shared_ptr<Machine>) const;
     RepeatedTuple<float, AGV_feature_size> get_AGV_feature(shared_ptr<AGV>) const;
-    shared_ptr<GraphFeature> features() const;
+    tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> features() const;
 
     bool finished() const;
     float finish_time_lower_bound() const;
@@ -161,6 +163,8 @@ public:
     void act_transport(AGVId, MachineId);
     void act_wait();
     shared_ptr<Graph> act(Action) const;
+
+    static tuple<vector<shared_ptr<Graph>>, vector<float>> batch_step(const vector<shared_ptr<Graph>> &, const vector<shared_ptr<Action>> &);
 
     void wait_operation();
     void wait_AGV();
@@ -177,6 +181,7 @@ protected:
     map<MachineId, shared_ptr<Machine>> machines;
     map<AGVId, shared_ptr<AGV>> AGVs;
 
+    set<tuple<MachineId, MachineId>> direct_paths;
     map<MachineId, map<MachineId, vector<MachineId>>> paths;
     map<MachineId, map<MachineId, float>> distances;
 
@@ -198,3 +203,12 @@ struct GraphFeature
     vector<tuple<size_t, size_t, float>> AGV_target;  // AGV_idx, machine_idx, rest_time
     vector<tuple<size_t, size_t, size_t>> AGV_loaded; // AGV_idx, from_operation_idx, to_operation_idx
 };
+
+struct IdIdxMapper
+{
+    map<OperationId, size_t> operation;
+    map<MachineId, size_t> machine;
+    map<AGVId, size_t> AGV;
+};
+
+#endif

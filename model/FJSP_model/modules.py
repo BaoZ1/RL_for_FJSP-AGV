@@ -1,95 +1,12 @@
 import torch
 from torch import nn, Tensor, tensor
+from torch.nn import functional as F
 from torch_geometric.data import HeteroData, Batch
 from torch_geometric import nn as gnn
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
-from FJSP_env import Graph, Environment
+from FJSP_env import Graph, Environment, Action, ActionType, Metadata, IdIdxMapper
 import lightning as L
-
-
-class BidiGATv2Conv(nn.Module):
-
-    def __init__(
-        self,
-        in_channels: int | tuple[int, int],
-        out_channels: int | tuple[int, int],
-        edge_dim: int | None = None,
-        dropout: float = 0.2,
-    ):
-        super().__init__()
-
-        if isinstance(in_channels, int):
-            in_channels = (in_channels, in_channels)
-        if isinstance(out_channels, int):
-            out_channels = (out_channels, out_channels)
-
-        self.forward_conv = gnn.GATv2Conv(
-            in_channels,
-            out_channels[0],
-            edge_dim=edge_dim,
-            dropout=dropout,
-            add_self_loops=False,
-        )
-        self.backward_conv = gnn.GATv2Conv(
-            in_channels[::-1],
-            out_channels[1],
-            edge_dim=edge_dim,
-            dropout=dropout,
-            add_self_loops=False,
-        )
-
-    def forward(
-        self,
-        x: tuple[Tensor, Tensor],
-        edge_index: Tensor,
-        edge_attr: Tensor | None = None,
-    ):
-        return (
-            self.backward_conv(x, edge_index, edge_attr),
-            self.forward_conv(x[::-1], edge_index.flip(0), edge_attr),
-        )
-
-
-class BidiHeteroConv(nn.Module):
-
-    def __init__(
-        self,
-        convs: dict[EdgeType, nn.Module],
-        aggr: str | None = "sum",
-    ):
-        super().__init__()
-
-        self.convs = ModuleDict(convs)
-        self.aggr = aggr
-
-    def forward(
-        self,
-        x_dict: dict[NodeType, Tensor],
-        edge_index_dict: dict[EdgeType, Tensor],
-        edge_attr_dict: dict[EdgeType, Tensor] | None = None,
-    ):
-        out_dict: dict[str, list[Tensor]] = {}
-
-        for edge_type, conv in self.convs.items():
-            src, _, dst = edge_type
-
-            x = (x_dict.get(src), x_dict.get(src))
-            edge_index = edge_index_dict.get(edge_type)
-            edge_attr = edge_attr_dict.get(edge_type) if edge_attr_dict else None
-
-            if not edge_index:
-                continue
-
-            out_src, out_dst = conv(x, edge_index, edge_attr)
-
-            out_dict.setdefault(src, []).append(out_src)
-            out_dict.setdefault(dst, []).append(out_dst)
-
-        for key, value in out_dict.items():
-            out_dict[key] = gnn.conv.hetero_conv.group(value, self.aggr)
-
-        return out_dict
 
 
 class ExtractLayer(nn.Module):
@@ -115,45 +32,22 @@ class ExtractLayer(nn.Module):
             }
         )
 
-        self.hetero_relation_extract = BidiHeteroConv(
+        type_channel_map = {
+            "operation": node_channels[0],
+            "machine": node_channels[1],
+            "AGV": node_channels[2],
+        }
+        self.hetero_relation_extract = gnn.HeteroConv(
             {
-                **{
-                    ("machine", name, "operation"): BidiGATv2Conv(
-                        (node_channels[1], node_channels[0]),
-                        (node_channels[1], node_channels[0]),
-                        edge_dim,
-                        dropout,
-                    )
-                    for name, edge_dim in [
-                        ("processable", None),
-                        ("processing", 1),
-                        ("waiting", 2),
-                    ]
-                },
-                **{
-                    ("AGV", name, "machine"): BidiGATv2Conv(
-                        (node_channels[2], node_channels[1]),
-                        (node_channels[2], node_channels[1]),
-                        edge_dim,
-                        dropout,
-                    )
-                    for name, edge_dim in [
-                        ("position", None),
-                        ("target", 1),
-                    ]
-                },
-                **{
-                    ("AGV", name, "operation"): BidiGATv2Conv(
-                        (node_channels[2], node_channels[0]),
-                        (node_channels[2], node_channels[0]),
-                        edge_dim,
-                        dropout,
-                    )
-                    for name, edge_dim in [
-                        ("position", None),
-                        ("target", None),
-                    ]
-                },
+                edge: gnn.GATv2Conv(
+                    (type_channel_map[edge[0]], type_channel_map[edge[2]]),
+                    type_channel_map[edge[2]],
+                    edge_dim=Metadata.edge_attrs.get(edge, None),
+                    dropout=dropout,
+                    add_self_loops=False,
+                )
+                for edge in Metadata.edge_types
+                if edge[0] != edge[2] != "operation"
             }
         )
 
@@ -168,6 +62,7 @@ class ExtractLayer(nn.Module):
         f1: dict[NodeType, Tensor] = self.operation_relation_extract(
             x_dict, edge_index_dict, edge_attr_dict
         )
+
         f2: dict[NodeType, Tensor] = self.hetero_relation_extract(
             x_dict, edge_index_dict, edge_attr_dict
         )
@@ -224,18 +119,17 @@ class StateMixer(nn.Module):
         self, x_dict: dict[NodeType, Tensor], batch_dict: dict[NodeType, Tensor]
     ) -> tuple[dict[NodeType, Tensor], Tensor]:
         edge_index_dict: dict[EdgeType, Tensor] = {}
+        node_dict = x_dict.copy()
 
         for k, batch in batch_dict.items():
-            x_dict[f"{k}_global"] = self.global_tokens[k].repeat(
+            node_dict[f"{k}_global"] = self.global_tokens[k].repeat(
                 batch.max().item() + 1, 1
             )
             edge_index_dict[(k, "global", f"{k}_global")] = (
-                tensor([[i, b] for i, b in enumerate(batch)])
-                .T.contiguous()
-                .to(batch.device)
+                tensor(list(enumerate(batch))).T.contiguous().to(batch.device)
             )
 
-        global_dict: dict[NodeType, Tensor] = self.convs(x_dict, edge_index_dict)
+        global_dict: dict[NodeType, Tensor] = self.convs(node_dict, edge_index_dict)
 
         graph_feature = self.graph_mix(
             torch.cat(
@@ -248,6 +142,9 @@ class StateMixer(nn.Module):
         )
 
         return global_dict, graph_feature
+
+
+StateEmbedding = tuple[dict[NodeType, Tensor], dict[NodeType, Tensor], Tensor]
 
 
 class StateExtract(nn.Module):
@@ -298,12 +195,12 @@ class StateExtract(nn.Module):
             graph_global_channels,
         )
 
-    def forward(
-        self, data: HeteroData | Batch
-    ) -> tuple[dict[NodeType, Tensor], dict[NodeType, Tensor], Tensor]:
+    def forward(self, data: HeteroData | Batch) -> StateEmbedding:
         x_dict = data.x_dict
         edge_index_dict = data.edge_index_dict
-        edge_attr_dict = data.edge_attr_dict
+        edge_attr_dict: dict[EdgeType, Tensor] = data.collect(
+            "edge_attr", allow_empty=True
+        )
         if isinstance(data, Batch):
             batch_dict = {k: data[k].batch for k in x_dict}
         else:
@@ -314,18 +211,141 @@ class StateExtract(nn.Module):
 
         for layer in self.backbone:
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
+            for key in x_dict:
+                x_dict[key] = F.leaky_relu(x_dict[key])
 
         global_dict, graph_feature = self.mix(x_dict, batch_dict)
 
         return x_dict, global_dict, graph_feature
 
 
+class ActionEncoder(nn.Module):
+    def __init__(
+        self,
+        out_channels: int,
+        node_channels: tuple[int, int, int],
+    ):
+        super().__init__()
+
+        self.wait_emb = nn.Parameter(torch.zeros(out_channels))
+        self.pick_encoder = nn.Sequential(
+            nn.Linear(
+                (
+                    node_channels[2]  # AGV
+                    + node_channels[0]  # operation_from
+                    + node_channels[0]  # operation_to
+                    + node_channels[1]  # machine_target
+                ),
+                out_channels * 2,
+            ),
+            nn.LeakyReLU(),
+            nn.Linear(out_channels * 2, out_channels),
+        )
+        self.transport_encoder = nn.Sequential(
+            nn.Linear(
+                (node_channels[1] + node_channels[2]),  # AGV  # machine_target
+                out_channels * 2,
+            ),
+            nn.LeakyReLU(),
+            nn.Linear(out_channels * 2, out_channels),
+        )
+        self.move_encoder = nn.Sequential(
+            nn.Linear(
+                (node_channels[1] + node_channels[2]),  # AGV  # machine_target
+                out_channels * 2,
+            ),
+            nn.LeakyReLU(),
+            nn.Linear(out_channels * 2, out_channels),
+        )
+
+    def forward(
+        self,
+        batch_actions: list[list[Action]],
+        embeddings: StateEmbedding,
+        node_offsets: list[dict[str, int]],
+        idx_mappers: list[IdIdxMapper],
+    ):
+        ret: list[Tensor] = []
+        for actions, offsets, idx_mapper in zip(batch_actions, node_offsets, idx_mappers):
+            encoded: list[Tensor] = []
+            for action in actions:
+                match action.action_type:
+                    case ActionType.wait:
+                        encoded.append(self.wait_emb)
+                        break
+                    case ActionType.pick:
+                        AGV_emb = embeddings[0]["AGV"][
+                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        ]
+                        operation_from_emb = embeddings[0]["operation"][
+                            offsets["operation"]
+                            + idx_mapper.operation[action.target_product.operation_from]
+                        ]
+                        operation_to_emb = embeddings[0]["operation"][
+                            offsets["operation"]
+                            + idx_mapper.operation[action.target_product.operation_to]
+                        ]
+                        machine_target_emb = embeddings[0]["machine"][
+                            offsets["machine"]
+                            + idx_mapper.machine[action.target_machine]
+                        ]
+                        encoded.append(
+                            self.pick_encoder(
+                                torch.cat(
+                                    [
+                                        AGV_emb,
+                                        operation_from_emb,
+                                        operation_to_emb,
+                                        machine_target_emb,
+                                    ]
+                                )
+                            )
+                        )
+                    case ActionType.transport:
+                        AGV_emb = embeddings[0]["AGV"][
+                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        ]
+                        machine_target_emb = embeddings[0]["machine"][
+                            offsets["machine"]
+                            + idx_mapper.machine[action.target_machine]
+                        ]
+                        encoded.append(
+                            self.transport_encoder(
+                                torch.cat(
+                                    [
+                                        AGV_emb,
+                                        machine_target_emb,
+                                    ]
+                                )
+                            )
+                        )
+                    case ActionType.move:
+                        AGV_emb = embeddings[0]["AGV"][
+                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        ]
+                        machine_target_emb = embeddings[0]["machine"][
+                            offsets["machine"]
+                            + idx_mapper.machine[action.target_machine]
+                        ]
+                        encoded.append(
+                            self.move_encoder(
+                                torch.cat(
+                                    [
+                                        AGV_emb,
+                                        machine_target_emb,
+                                    ]
+                                )
+                            )
+                        )
+            ret.append(torch.stack(encoded))
+        return ret
+
 class StateModel(L.LightningModule):
     def __init__(self, model: StateExtract):
         super().__init__()
-        
+
         self.model = model
         self.envs = Environment()
-        
+
     def training_step(self, batch, batch_idx):
         pass

@@ -175,6 +175,8 @@ Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueu
     }
     this->next_AGV_id = other.next_AGV_id;
 
+    this->direct_paths = other.direct_paths;
+    this->paths = other.paths;
     this->distances = other.distances;
 
     this->inited = other.inited;
@@ -250,7 +252,8 @@ py::dict Graph::get_state() const
         "operations"_a = operation_dict,
         "machines"_a = machine_dict,
         "AGVs"_a = AGV_dict,
-        "paths"_a = this->paths,
+        "direct_paths"_a = this->direct_paths,
+        // "paths"_a = this->paths,
         // "distances"_a = this->distances,
         "next_operation_id"_a = this->next_operation_id,
         "next_machine_id"_a = this->next_machine_id,
@@ -330,16 +333,19 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         }
     }
 
-    res->paths.clear();
-    for (auto [k1, v1] : d["paths"].cast<py::dict>())
-    {
-        map<MachineId, vector<MachineId>> line;
-        for (auto [k2, v2] : v1.cast<py::dict>())
-        {
-            line[k2.cast<int>()] = v2.cast<vector<MachineId>>();
-        }
-        res->paths[k1.cast<int>()] = line;
-    }
+    res->direct_paths.clear();
+    res->direct_paths = d["direct_paths"].cast<set<tuple<MachineId, MachineId>>>();
+
+    // res->paths.clear();
+    // for (auto [k1, v1] : d["paths"].cast<py::dict>())
+    // {
+    //     map<MachineId, vector<MachineId>> line;
+    //     for (auto [k2, v2] : v1.cast<py::dict>())
+    //     {
+    //         line[k2.cast<int>()] = v2.cast<vector<MachineId>>();
+    //     }
+    //     res->paths[k1.cast<int>()] = line;
+    // }
 
     // res->distances.clear();
     // for (auto [k1, v1] : d["distances"].cast<py::dict>())
@@ -598,17 +604,15 @@ string Graph::repr() const
 void Graph::add_path(MachineId a, MachineId b)
 {
     this->distances.clear();
-    this->paths[a].emplace(b, vector<MachineId>{b});
-    this->paths[b].emplace(a, vector<MachineId>{a});
+    this->direct_paths.emplace(a, b);
+    this->direct_paths.emplace(b, a);
 }
 
 void Graph::remove_path(MachineId a, MachineId b)
 {
-    assert(this->paths.at(a).at(b) == vector<MachineId>{b});
-    assert(this->paths.at(b).at(a) == vector<MachineId>{a});
     this->distances.clear();
-    this->paths.at(a).at(b).clear();
-    this->paths.at(b).at(a).clear();
+    this->direct_paths.erase({a, b});
+    this->direct_paths.erase({b, a});
 }
 
 void Graph::calc_distance()
@@ -618,11 +622,11 @@ void Graph::calc_distance()
     {
         for (auto t_id : this->machines | views::keys)
         {
-            if(f_id == t_id)
+            if (f_id == t_id)
             {
                 this->distances[f_id][t_id] = 0;
             }
-            else if(this->paths[f_id][t_id].size() == 1)
+            else if (this->direct_paths.contains({f_id, t_id}))
             {
                 this->distances[f_id][t_id] = this->machines.at(f_id)->pos.distance(this->machines.at(t_id)->pos);
             }
@@ -631,6 +635,12 @@ void Graph::calc_distance()
                 this->distances[f_id][t_id] = numeric_limits<float>::infinity() / 3;
             }
         }
+    }
+
+    this->paths.clear();
+    for (auto [f_id, t_id] : this->direct_paths)
+    {
+        this->paths[f_id][t_id].emplace_back(t_id);
     }
 
     for (auto m_id : this->machines | views::keys)
@@ -697,7 +707,7 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
         MachineId a = machines.at(machine_idx_dist(engine));
         MachineId b = machines.at(machine_idx_dist(engine));
 
-        if (!ret->paths[a][b].empty())
+        if (ret->direct_paths.contains({a, b}))
         {
             continue;
         }
@@ -767,13 +777,13 @@ shared_ptr<Graph> Graph::copy() const
 
 RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature(shared_ptr<Operation> operation) const
 {
-    float status_is_blocked = operation->status == OperationStatus::blocked ? 1.0 : 0.0;
-    float status_is_waiting = operation->status == OperationStatus::waiting ? 1.0 : 0.0;
-    float status_is_processing = operation->status == OperationStatus::processing ? 1.0 : 0.0;
-    float status_is_finished = operation->status == OperationStatus::finished ? 1.0 : 0.0;
+    float status_is_blocked = operation->status == OperationStatus::blocked ? 1 : 0;
+    float status_is_waiting = operation->status == OperationStatus::waiting ? 1 : 0;
+    float status_is_processing = operation->status == OperationStatus::processing ? 1 : 0;
+    float status_is_finished = operation->status == OperationStatus::finished ? 1 : 0;
 
     float total_process_time = operation->process_time;
-    float rest_process_time = status_is_processing ? (operation->finish_timestamp - this->timestamp) : 0.0;
+    float rest_process_time = status_is_processing ? (operation->finish_timestamp - this->timestamp) : 0;
 
     float total_material = operation->status <= OperationStatus::waiting ? operation->predecessors.size() : 0;
     float rest_material = operation->status <= OperationStatus::waiting ? (total_material - operation->arrived_preds.size()) : 0;
@@ -799,7 +809,7 @@ RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(sha
     float status_is_working = machine->status == MachineStatus::working;
 
     float rest_process_time = machine->status == MachineStatus::working
-                                  ? (this->operations.at(machine->waiting_operation.value())->finish_timestamp - this->timestamp)
+                                  ? (this->operations.at(machine->working_operation.value())->finish_timestamp - this->timestamp)
                                   : 0;
 
     float same_type_count = ranges::count_if(this->machines | views::values, [this, machine](auto other)
@@ -835,39 +845,38 @@ RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<
             rest_act_time};
 }
 
-shared_ptr<GraphFeature> Graph::features() const
+tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
 {
     assert(this->inited);
 
-    auto ret = make_shared<GraphFeature>();
+    auto feature = make_shared<GraphFeature>();
+    auto mapper = make_shared<IdIdxMapper>();
 
-    ret->operation_features.resize(this->operations.size());
+    feature->operation_features.resize(this->operations.size());
     auto operations_with_idx = this->operations | views::values | views::enumerate;
-    map<OperationId, size_t> operation_id_idx_mapper;
     for (auto [i, operation] : operations_with_idx)
     {
-        ret->operation_features[i] = this->get_operation_feature(operation);
-        operation_id_idx_mapper[operation->id] = static_cast<size_t>(i);
+        feature->operation_features[i] = this->get_operation_feature(operation);
+        mapper->operation[operation->id] = static_cast<size_t>(i);
     }
 
-    ret->machine_features.resize(this->machines.size());
+    feature->machine_features.resize(this->machines.size());
     auto machine_with_idx = this->machines | views::values | views::enumerate;
-    map<MachineId, size_t> machine_id_idx_mapper;
     map<MachineType, vector<float>> machine_type_idx_mask;
     for (auto [i, machine] : machine_with_idx)
     {
-        ret->machine_features[i] = Graph::get_machine_feature(machine);
-        machine_id_idx_mapper[machine->id] = static_cast<size_t>(i);
+        feature->machine_features[i] = Graph::get_machine_feature(machine);
+        mapper->machine[machine->id] = static_cast<size_t>(i);
 
         if (machine->working_operation.has_value())
         {
             auto operation = this->operations.at(machine->working_operation.value());
-            ret->processing.emplace_back(i, operation_id_idx_mapper.at(operation->id), operation->finish_timestamp - this->timestamp);
+            feature->processing.emplace_back(i, mapper->operation.at(operation->id), operation->finish_timestamp - this->timestamp);
         }
         if (machine->waiting_operation.has_value())
         {
             auto operation = this->operations.at(machine->waiting_operation.value());
-            ret->waiting.emplace_back(i, operation_id_idx_mapper.at(machine->waiting_operation.value()), operation->predecessors.size(), operation->arrived_preds.size());
+            feature->waiting.emplace_back(i, mapper->operation.at(machine->waiting_operation.value()), operation->predecessors.size(), operation->arrived_preds.size());
         }
     }
 
@@ -875,43 +884,44 @@ shared_ptr<GraphFeature> Graph::features() const
     {
         for (auto p_id : operation->predecessors)
         {
-            ret->predecessor_idx.emplace_back(i, operation_id_idx_mapper.at(p_id));
+            feature->predecessor_idx.emplace_back(i, mapper->operation.at(p_id));
         }
         for (auto s_id : operation->successors)
         {
-            ret->successor_idx.emplace_back(i, operation_id_idx_mapper.at(s_id));
+            feature->successor_idx.emplace_back(i, mapper->operation.at(s_id));
         }
         for (auto [m_id, m] : machine_with_idx)
         {
             if (m->type == operation->machine_type)
             {
-                ret->processable_idx.emplace_back(m_id, i);
+                feature->processable_idx.emplace_back(m_id, i);
             }
         }
     }
 
-    ret->AGV_features.resize(this->AGVs.size());
+    feature->AGV_features.resize(this->AGVs.size());
     auto AGV_with_idx = this->AGVs | views::values | views::enumerate;
     for (auto [i, AGV] : AGV_with_idx)
     {
-        ret->AGV_features[i] = Graph::get_AGV_feature(AGV);
+        feature->AGV_features[i] = Graph::get_AGV_feature(AGV);
+        mapper->AGV[AGV->id] = static_cast<size_t>(i);
         if (AGV->status == AGVStatus::idle)
         {
-            ret->AGV_position.emplace_back(i, machine_id_idx_mapper.at(AGV->position));
+            feature->AGV_position.emplace_back(i, mapper->machine.at(AGV->position));
         }
         else
         {
             auto t = AGV->finish_timestamp - this->timestamp;
-            ret->AGV_target.emplace_back(i, machine_id_idx_mapper.at(AGV->target_machine), t);
+            feature->AGV_target.emplace_back(i, mapper->machine.at(AGV->target_machine), t);
         }
         if (AGV->loaded_item.has_value())
         {
             auto p = AGV->loaded_item.value();
-            ret->AGV_loaded.emplace_back(i, operation_id_idx_mapper.at(p.from), operation_id_idx_mapper.at(p.to));
+            feature->AGV_loaded.emplace_back(i, mapper->operation.at(p.from), mapper->operation.at(p.to));
         }
     }
 
-    return ret;
+    return make_tuple(feature, mapper);
 }
 
 bool Graph::finished() const
@@ -993,6 +1003,10 @@ vector<Action> Graph::get_available_actions() const
     assert(this->inited);
 
     vector<Action> ret;
+    if (!this->processing_operations.empty() || !this->moving_AGVs.empty())
+    {
+        ret.emplace_back(ActionType::wait);
+    }
 
     vector<shared_ptr<Machine>> transportable_machines;
     vector<pair<shared_ptr<Machine>, Product>> pickable_products;
@@ -1197,10 +1211,26 @@ shared_ptr<Graph> Graph::act(Action action) const
         break;
     case ActionType::wait:
         ret->act_wait();
+        break;
     default:
         assert(false);
     }
     return ret;
+}
+
+tuple<vector<shared_ptr<Graph>>, vector<float>> Graph::batch_step(const vector<shared_ptr<Graph>> &envs, const vector<shared_ptr<Action>> &actions)
+{
+    auto pairs = views::zip(vector(envs), vector<float>(envs.size(), 0), actions) | ranges::to<vector>();
+
+    for_each(execution::par,
+             pairs.begin(), pairs.end(),
+             [](tuple<shared_ptr<Graph>, float, shared_ptr<Action>> &item)
+             {
+                 auto &[env, lb, action] = item;
+                 env = env->act(*action);
+                 lb = env->finish_time_lower_bound();
+             });
+    return make_tuple(pairs | views::elements<0> | ranges::to<vector>(), pairs | views::elements<1> | ranges::to<vector>());
 }
 
 void Graph::wait_operation()
