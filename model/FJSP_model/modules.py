@@ -1,12 +1,24 @@
 import torch
 from torch import nn, Tensor, tensor
 from torch.nn import functional as F
-from torch_geometric.data import HeteroData, Batch
+from torch import optim
+from torch.utils.data import DataLoader
+from torch_geometric.data import Batch
 from torch_geometric import nn as gnn
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
-from FJSP_env import Graph, Environment, Action, ActionType, Metadata, IdIdxMapper
+from FJSP_env import (
+    Graph,
+    Environment,
+    Action,
+    ActionType,
+    IdIdxMapper,
+    Observation,
+)
+from .utils import *
 import lightning as L
+from collections.abc import Callable
+from tqdm import tqdm
 
 
 class ExtractLayer(nn.Module):
@@ -151,51 +163,34 @@ class StateExtract(nn.Module):
 
     def __init__(
         self,
-        operation_hidden_channels: int,
-        machine_hidden_channels: int,
-        AGV_hidden_channels: int,
-        extract_num_layers: int,
+        hidden_channels: tuple[int, int, int],
         global_channels: tuple[int, int, int],
         graph_global_channels: int,
+        extract_num_layers: int,
     ):
         super().__init__()
 
         self.init_project = nn.ModuleDict(
             {
                 "operation": nn.Linear(
-                    Graph.operation_feature_size, operation_hidden_channels
+                    Graph.operation_feature_size, hidden_channels[0]
                 ),
-                "machine": nn.Linear(
-                    Graph.machine_feature_size, machine_hidden_channels
-                ),
-                "AGV": nn.Linear(Graph.AGV_feature_size, AGV_hidden_channels),
+                "machine": nn.Linear(Graph.machine_feature_size, hidden_channels[1]),
+                "AGV": nn.Linear(Graph.AGV_feature_size, hidden_channels[2]),
             }
         )
 
         self.backbone = nn.ModuleList(
-            [
-                ExtractLayer(
-                    (
-                        operation_hidden_channels,
-                        machine_hidden_channels,
-                        AGV_hidden_channels,
-                    )
-                )
-                for _ in range(extract_num_layers)
-            ]
+            ExtractLayer(hidden_channels) for _ in range(extract_num_layers)
         )
 
         self.mix = StateMixer(
-            (
-                operation_hidden_channels,
-                machine_hidden_channels,
-                AGV_hidden_channels,
-            ),
+            hidden_channels,
             global_channels,
             graph_global_channels,
         )
 
-    def forward(self, data: HeteroData | Batch) -> StateEmbedding:
+    def forward(self, data: HeteroGraph | Batch) -> StateEmbedding:
         x_dict = data.x_dict
         edge_index_dict = data.edge_index_dict
         edge_attr_dict: dict[EdgeType, Tensor] = data.collect(
@@ -217,6 +212,8 @@ class StateExtract(nn.Module):
         global_dict, graph_feature = self.mix(x_dict, batch_dict)
 
         return x_dict, global_dict, graph_feature
+
+    __call__: Callable[[HeteroGraph | Batch], StateEmbedding]
 
 
 class ActionEncoder(nn.Module):
@@ -261,12 +258,12 @@ class ActionEncoder(nn.Module):
     def forward(
         self,
         batch_actions: list[list[Action]],
-        embeddings: StateEmbedding,
-        node_offsets: list[dict[str, int]],
+        embeddings: dict[str, Tensor],
+        offsets: dict[str, dict[int, int]],
         idx_mappers: list[IdIdxMapper],
     ):
         ret: list[Tensor] = []
-        for actions, offsets, idx_mapper in zip(batch_actions, node_offsets, idx_mappers):
+        for i, (actions, idx_mapper) in enumerate(zip(batch_actions, idx_mappers)):
             encoded: list[Tensor] = []
             for action in actions:
                 match action.action_type:
@@ -274,19 +271,19 @@ class ActionEncoder(nn.Module):
                         encoded.append(self.wait_emb)
                         break
                     case ActionType.pick:
-                        AGV_emb = embeddings[0]["AGV"][
-                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        AGV_emb = embeddings["AGV"][
+                            offsets["AGV"][i] + idx_mapper.AGV[action.AGV_id]
                         ]
-                        operation_from_emb = embeddings[0]["operation"][
-                            offsets["operation"]
+                        operation_from_emb = embeddings["operation"][
+                            offsets["operation"][i]
                             + idx_mapper.operation[action.target_product.operation_from]
                         ]
-                        operation_to_emb = embeddings[0]["operation"][
-                            offsets["operation"]
+                        operation_to_emb = embeddings["operation"][
+                            offsets["operation"][i]
                             + idx_mapper.operation[action.target_product.operation_to]
                         ]
-                        machine_target_emb = embeddings[0]["machine"][
-                            offsets["machine"]
+                        machine_target_emb = embeddings["machine"][
+                            offsets["machine"][i]
                             + idx_mapper.machine[action.target_machine]
                         ]
                         encoded.append(
@@ -302,11 +299,11 @@ class ActionEncoder(nn.Module):
                             )
                         )
                     case ActionType.transport:
-                        AGV_emb = embeddings[0]["AGV"][
-                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        AGV_emb = embeddings["AGV"][
+                            offsets["AGV"][i] + idx_mapper.AGV[action.AGV_id]
                         ]
-                        machine_target_emb = embeddings[0]["machine"][
-                            offsets["machine"]
+                        machine_target_emb = embeddings["machine"][
+                            offsets["machine"][i]
                             + idx_mapper.machine[action.target_machine]
                         ]
                         encoded.append(
@@ -320,11 +317,11 @@ class ActionEncoder(nn.Module):
                             )
                         )
                     case ActionType.move:
-                        AGV_emb = embeddings[0]["AGV"][
-                            offsets["AGV"] + idx_mapper.AGV[action.AGV_id]
+                        AGV_emb = embeddings["AGV"][
+                            offsets["AGV"][i] + idx_mapper.AGV[action.AGV_id]
                         ]
-                        machine_target_emb = embeddings[0]["machine"][
-                            offsets["machine"]
+                        machine_target_emb = embeddings["machine"][
+                            offsets["machine"][i]
                             + idx_mapper.machine[action.target_machine]
                         ]
                         encoded.append(
@@ -340,12 +337,155 @@ class ActionEncoder(nn.Module):
             ret.append(torch.stack(encoded))
         return ret
 
-class StateModel(L.LightningModule):
-    def __init__(self, model: StateExtract):
+    __call__: Callable[
+        [
+            list[list[Action]],
+            dict[str, Tensor],
+            dict[str, dict[int, int]],
+            list[IdIdxMapper],
+        ],
+        list[Tensor],
+    ]
+
+    def single_action_encode(
+        self,
+        actions: list[Action],
+        embeddings: dict[str, Tensor],
+        offsets: dict[str, dict[int, int]],
+        idx_mappers: list[IdIdxMapper],
+    ):
+        return torch.cat(
+            self.forward(
+                [[action] for action in actions],
+                embeddings,
+                offsets,
+                idx_mappers,
+            )
+        )
+
+
+class StateModel(nn.Module):
+
+    def __init__(
+        self,
+        hidden_channels: tuple[int, int, int],
+        global_channels: tuple[int, int, int],
+        graph_global_channels: int,
+        extract_num_layers: int,
+        action_channels: int,
+    ):
         super().__init__()
 
-        self.model = model
-        self.envs = Environment()
+        self.extractor = StateExtract(
+            hidden_channels,
+            global_channels,
+            graph_global_channels,
+            extract_num_layers,
+        )
+        self.action_encoder = ActionEncoder(action_channels, hidden_channels)
 
-    def training_step(self, batch, batch_idx):
-        pass
+    def forward(self, obs: list[Observation]) -> tuple[StateEmbedding, list[Tensor]]:
+        batched_graph = Batch.from_data_list([build_graph(ob.feature) for ob in obs])
+        states: StateEmbedding = self.extractor(batched_graph)
+        action_embs = self.action_encoder(
+            [ob.action_list for ob in obs],
+            states[0],
+            get_offsets(batched_graph),
+            [ob.mapper for ob in obs],
+        )
+        return states, action_embs
+
+    __call__: Callable[[Observation], tuple[StateEmbedding, list[Tensor]]]
+
+
+class StatePredictor(nn.Module):
+    def __init__(self, state_channels: int, action_channels: int):
+        super().__init__()
+
+        self.model = nn.Sequential(
+            nn.Linear(state_channels + action_channels, state_channels * 2),
+            nn.Tanh(),
+            nn.Linear(state_channels * 2, state_channels * 2),
+            nn.Tanh(),
+            nn.Linear(state_channels * 2, state_channels),
+        )
+
+    def forward(self, states: Tensor, actions: Tensor) -> Tensor:
+        return self.model(torch.cat([states, actions], 1))
+
+    __call__: Callable[[Tensor, Tensor], Tensor]
+
+
+class BackboneTrainer(L.LightningModule):
+
+    def __init__(
+        self,
+        envs: Environment,
+        extractor: StateExtract,
+        action_encoder: ActionEncoder,
+        predictor: StatePredictor,
+    ):
+        super().__init__()
+
+        self.envs = envs
+
+        self.extractor = extractor
+        self.action_encoder = action_encoder
+        self.predictor = predictor
+
+        self.buffer = ReplayBuffer[Observation]()
+
+    def configure_optimizers(self):
+        return optim.Adam(self.parameters(), 1e-4)
+
+    def training_step(self, batch: list[ReplayItem[Observation]], batch_idx):
+        batched_graph = Batch.from_data_list(
+            [build_graph(item.state.feature) for item in batch]
+        )
+        batched_graph = batched_graph.to(self.device)
+        states = self.extractor(batched_graph)
+        action_embs = self.action_encoder.single_action_encode(
+            [item.action for item in batch],
+            states[0],
+            get_offsets(batched_graph),
+            [item.state.mapper for item in batch],
+        )
+        pred = self.predictor(states[2], action_embs)
+
+        batched_next_graph = Batch.from_data_list(
+            [build_graph(item.next_state.feature) for item in batch]
+        )
+        batched_next_graph = batched_next_graph.to(self.device)
+        target = self.extractor(batched_next_graph)[2]
+
+        loss = F.mse_loss(pred, target)
+        return loss
+
+    def update_buffer(self):
+        progress = tqdm(range(200), desc="Update Buffer")
+        for _ in progress:
+            obs = self.envs.observe()
+            act: list[Action] = []
+            for env_action in [ob.action_list for ob in obs]:
+                has_useful = False
+                for a in env_action:
+                    if a.action_type != ActionType.move:
+                        act.append(a)
+                        has_useful = True
+                        break
+                if not has_useful:
+                    act.append(np.random.choice(env_action))
+            lb, done, next_obs = self.envs.step(act)
+            for data in zip(obs, act, lb, done, next_obs):
+                self.buffer.append(*data)
+
+    def on_train_epoch_end(self):        
+        self.update_buffer()
+
+    def train_dataloader(self):
+        self.update_buffer()
+        return DataLoader(
+            ReplayDataset(self.buffer, 500),
+            5,
+            collate_fn=lambda batch: batch,
+        )

@@ -22,3 +22,4 @@ backend/dist
 **/*.pyd
 **/*.pyi
 *.code-workspace
+**/lightning_logs

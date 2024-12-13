@@ -79,6 +79,8 @@ constexpr string enum_string(ActionType t)
 {
     switch (t)
     {
+    case ActionType::wait:
+        return string("wait");
     case ActionType::move:
         return string("move");
     case ActionType::pick:
