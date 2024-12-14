@@ -269,7 +269,6 @@ class ActionEncoder(nn.Module):
                 match action.action_type:
                     case ActionType.wait:
                         encoded.append(self.wait_emb)
-                        break
                     case ActionType.pick:
                         AGV_emb = embeddings["AGV"][
                             offsets["AGV"][i] + idx_mapper.AGV[action.AGV_id]
@@ -364,38 +363,40 @@ class ActionEncoder(nn.Module):
         )
 
 
-class StateModel(nn.Module):
-
-    def __init__(
-        self,
-        hidden_channels: tuple[int, int, int],
-        global_channels: tuple[int, int, int],
-        graph_global_channels: int,
-        extract_num_layers: int,
-        action_channels: int,
-    ):
+class PredictNet(nn.Module):
+    def __init__(self, state_channels: int, action_channels: int):
         super().__init__()
-
-        self.extractor = StateExtract(
-            hidden_channels,
-            global_channels,
-            graph_global_channels,
-            extract_num_layers,
+        base_channels = state_channels + action_channels
+        self.base = nn.Sequential(
+            nn.Linear(base_channels, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
         )
-        self.action_encoder = ActionEncoder(action_channels, hidden_channels)
 
-    def forward(self, obs: list[Observation]) -> tuple[StateEmbedding, list[Tensor]]:
-        batched_graph = Batch.from_data_list([build_graph(ob.feature) for ob in obs])
-        states: StateEmbedding = self.extractor(batched_graph)
-        action_embs = self.action_encoder(
-            [ob.action_list for ob in obs],
-            states[0],
-            get_offsets(batched_graph),
-            [ob.mapper for ob in obs],
+        self.value = nn.Sequential(
+            nn.Linear(base_channels * 2, base_channels // 2),
+            nn.Tanh(),
+            nn.Linear(base_channels // 2, 1),
         )
-        return states, action_embs
 
-    __call__: Callable[[Observation], tuple[StateEmbedding, list[Tensor]]]
+        self.next_state = nn.Sequential(
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, state_channels),
+        )
+
+    def forward(self, state: Tensor, action: Tensor):
+        base_data: Tensor = self.base(torch.cat([state, action], 1))
+        return self.value(base_data).flatten(), self.next_state(base_data)
+
+    __call__: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]
 
 
 class StatePredictor(nn.Module):
@@ -416,6 +417,49 @@ class StatePredictor(nn.Module):
     __call__: Callable[[Tensor, Tensor], Tensor]
 
 
+class ActionGenerator(nn.Module):
+    def __init__(self, state_channels: int, action_channels: int, out_num: int):
+        super().__init__()
+
+        self.action_channels = action_channels
+        self.out_num = out_num
+
+        base_channels = state_channels + action_channels
+
+        self.generator = nn.Sequential(
+            nn.Linear(state_channels, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels * 2),
+            nn.Tanh(),
+            nn.Linear(base_channels * 2, base_channels),
+            nn.Tanh(),
+            nn.Linear(base_channels, action_channels * out_num),
+        )
+
+        self.discriminator = nn.Sequential(
+            nn.Linear(action_channels, action_channels * 2),
+            nn.Tanh(),
+            nn.Linear(action_channels * 2, action_channels * 2),
+            nn.Tanh(),
+            nn.Linear(action_channels * 2, action_channels),
+            nn.Tanh(),
+            nn.Linear(action_channels, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, states: Tensor, true_samples: Tensor):
+        generated: Tensor = self.generator(states)
+        generated = generated.reshape(-1, self.out_num, self.action_channels)
+        return self.discriminator(torch.cat([true_samples, generated], 1)).squeeze(-1), generated
+
+    __call__: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]
+
+    def generate(self, state: Tensor):
+        return self.generator(state).reshape(self.out_num, self.action_channels)
+
+
 class BackboneTrainer(L.LightningModule):
 
     def __init__(
@@ -423,7 +467,8 @@ class BackboneTrainer(L.LightningModule):
         envs: Environment,
         extractor: StateExtract,
         action_encoder: ActionEncoder,
-        predictor: StatePredictor,
+        predictor: PredictNet,
+        action_generator: ActionGenerator,
     ):
         super().__init__()
 
@@ -432,6 +477,7 @@ class BackboneTrainer(L.LightningModule):
         self.extractor = extractor
         self.action_encoder = action_encoder
         self.predictor = predictor
+        self.action_generator = action_generator
 
         self.buffer = ReplayBuffer[Observation]()
 
@@ -443,23 +489,75 @@ class BackboneTrainer(L.LightningModule):
             [build_graph(item.state.feature) for item in batch]
         )
         batched_graph = batched_graph.to(self.device)
+        offsets = get_offsets(batched_graph)
+        mappers = [item.state.mapper for item in batch]
+
         states = self.extractor(batched_graph)
         action_embs = self.action_encoder.single_action_encode(
             [item.action for item in batch],
             states[0],
-            get_offsets(batched_graph),
-            [item.state.mapper for item in batch],
+            offsets,
+            mappers,
         )
-        pred = self.predictor(states[2], action_embs)
 
+        value_pred, state_pred = self.predictor(states[2], action_embs)
+
+        value_target = torch.tensor([item.reward for item in batch], device=self.device)
+        value_loss = F.mse_loss(value_pred, value_target)
+
+        true_action_count = min(
+            self.action_generator.out_num,
+            min(len(item.state.action_list) for item in batch),
+        )
+        true_action_lists = [
+            item.state.action_list[:true_action_count] for item in batch
+        ]
+        true_actions = self.action_encoder(
+            true_action_lists, states[0], offsets, mappers
+        )
+        true_actions = torch.stack(true_actions)
+        discriminate_result, generated_actions = self.action_generator(states[2], true_actions)
+        discriminate_target = torch.cat(
+            [
+                torch.ones(len(batch), true_action_count, device=self.device),
+                torch.zeros(len(batch), self.action_generator.out_num, device=self.device),
+            ],
+            1,
+        )
+        generate_loss = F.binary_cross_entropy(discriminate_result, discriminate_target)
+        
         batched_next_graph = Batch.from_data_list(
             [build_graph(item.next_state.feature) for item in batch]
         )
         batched_next_graph = batched_next_graph.to(self.device)
-        target = self.extractor(batched_next_graph)[2]
+        state_target = self.extractor(batched_next_graph)[2]
+        state_loss = F.mse_loss(state_pred, state_target)
 
-        loss = F.mse_loss(pred, target)
-        return loss
+        self.log_dict(
+            {
+                "loss/value": value_loss,
+                "loss/generate": generate_loss,
+                "loss/state": state_loss,
+            },
+            True,
+        )
+        if batch_idx == 0:
+            self.log_dict(
+                {"value/pred": value_pred[0], "value/target": value_target[0]}
+            )
+            self.log_dict(
+                {
+                    "generate/var/true": true_actions.var(-1).mean(),
+                    "generate/var/generated": generated_actions.var(-1).mean(),
+                }
+            )
+            self.log_dict(
+                {
+                    "state/var/pred": state_pred.var(),
+                    "state/var/target": state_target.var(),
+                }
+            )
+        return value_loss + generate_loss + state_loss
 
     def update_buffer(self):
         progress = tqdm(range(200), desc="Update Buffer")
@@ -479,13 +577,13 @@ class BackboneTrainer(L.LightningModule):
             for data in zip(obs, act, lb, done, next_obs):
                 self.buffer.append(*data)
 
-    def on_train_epoch_end(self):        
+    def on_train_epoch_end(self):
         self.update_buffer()
 
     def train_dataloader(self):
         self.update_buffer()
         return DataLoader(
             ReplayDataset(self.buffer, 500),
-            5,
+            32,
             collate_fn=lambda batch: batch,
         )
