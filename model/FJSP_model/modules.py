@@ -439,7 +439,7 @@ class ActionGenerator(nn.Module):
         )
 
         self.discriminator = nn.Sequential(
-            nn.Linear(action_channels, action_channels * 2),
+            nn.Linear(base_channels, action_channels * 2),
             nn.Tanh(),
             nn.Linear(action_channels * 2, action_channels * 2),
             nn.Tanh(),
@@ -452,7 +452,10 @@ class ActionGenerator(nn.Module):
     def forward(self, states: Tensor, true_samples: Tensor):
         generated: Tensor = self.generator(states)
         generated = generated.reshape(-1, self.out_num, self.action_channels)
-        return self.discriminator(torch.cat([true_samples, generated], 1)).squeeze(-1), generated
+        actions = torch.cat([true_samples, generated], 1)
+        expanded_states = states.unsqueeze(1).expand(-1, actions.size(1), -1)
+        conditioned = torch.cat([expanded_states, actions], dim=2)
+        return self.discriminator(conditioned).squeeze(-1), generated
 
     __call__: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]
 
