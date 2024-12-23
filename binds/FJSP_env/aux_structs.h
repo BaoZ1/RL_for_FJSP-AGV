@@ -107,6 +107,11 @@ public:
         throw runtime_error("Empty priority queue");
     }
 
+    void clear()
+    {
+        this->data.clear();
+    }
+
     bool empty() const
     {
         return this->data.empty();

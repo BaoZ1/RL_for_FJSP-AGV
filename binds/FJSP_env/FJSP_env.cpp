@@ -1,21 +1,21 @@
-#include <variant>
-#include <optional>
-#include <memory>
-#include <format>
-#include <ranges>
-#include <iostream>
 #include <concepts>
-#include <random>
-#include <functional>
-#include <limits>
 #include <execution>
+#include <format>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <random>
+#include <ranges>
+#include <variant>
 
 #include <map>
-#include <tuple>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
-#include <queue>
+#include <tuple>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -47,13 +47,11 @@ string Operation::repr() const
     stringstream ss;
     if (this->status != OperationStatus::processing)
     {
-        ss << format("<operation (id: {}, type: {}, process_time: {:.2f}, status: {})\n",
-                     this->id, this->machine_type, this->process_time, enum_string(this->status));
+        ss << format("<operation (id: {}, type: {}, process_time: {:.2f}, status: {})\n", this->id, this->machine_type, this->process_time, enum_string(this->status));
     }
     else
     {
-        ss << format("<operation (id: {}, type: {}, process_time: {:.2f}, status: {}, finish_timestamp: {:.2f})\n",
-                     this->id, this->machine_type, this->process_time, enum_string(this->status), this->finish_timestamp);
+        ss << format("<operation (id: {}, type: {}, process_time: {:.2f}, status: {}, finish_timestamp: {:.2f})\n", this->id, this->machine_type, this->process_time, enum_string(this->status), this->finish_timestamp);
     }
 
     ss << add_indent(format("p: {}", id_set_string(this->predecessors)));
@@ -72,8 +70,7 @@ Machine::Machine(MachineId id, MachineType tp, Position pos) : id(id),
 
 string Machine::repr() const
 {
-    return format("<machine (id: {}, type: {}, status: {}, working: {}, waiting: {})>",
-                  this->id, this->type, enum_string(this->status), o2s(this->working_operation), o2s(this->waiting_operation));
+    return format("<machine (id: {}, type: {}, status: {}, working: {}, waiting: {})>", this->id, this->type, enum_string(this->status), o2s(this->working_operation), v2s(this->waiting_operation));
 }
 
 AGV::AGV(AGVId id, float speed, MachineId init_pos) : id(id),
@@ -92,14 +89,11 @@ string AGV::repr() const
     switch (this->status)
     {
     case AGVStatus::idle:
-        return format("<AGV (id: {}, speed: {:.2f}, status: {}, position: {}, loaded_item: {})>",
-                      this->id, this->speed, enum_string(this->status), this->position, o2s(this->loaded_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, position: {}, loaded_item: {})>", this->id, this->speed, enum_string(this->status), this->position, o2s(this->loaded_item));
     case AGVStatus::picking:
-        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, target_item: {})>",
-                      this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->target_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, target_item: {})>", this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->target_item));
     default:
-        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>",
-                      this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->loaded_item));
+        return format("<AGV (id: {}, speed: {:.2f}, status: {}, from: {}, to: {}, finish_timestamp: {:.2f}, loaded_item: {})>", this->id, this->speed, enum_string(this->status), this->position, this->target_machine, this->finish_timestamp, o2s(this->loaded_item));
     }
 }
 
@@ -124,11 +118,9 @@ string Action::repr() const
     {
     case ActionType::move:
     case ActionType::transport:
-        return format("<Action (type: {}, AGV_id: {}, target_machine: {})>",
-                      enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine));
+        return format("<Action (type: {}, AGV_id: {}, target_machine: {})>", enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine));
     case ActionType::pick:
-        return format("<Action (type: {}, AGV_id: {}, target_machine: {}, target_product: {})>",
-                      enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine), o2s(this->target_product));
+        return format("<Action (type: {}, AGV_id: {}, target_machine: {}, target_product: {})>", enum_string(this->type), o2s(this->act_AGV), o2s(this->target_machine), o2s(this->target_product));
     case ActionType::wait:
         return format("<Action (type: {})>", enum_string(this->type));
     };
@@ -201,21 +193,20 @@ py::dict Graph::get_state() const
             "predecessors"_a = vector<OperationId>(from_range, operation->predecessors),
             "arrived_preds"_a = vector<OperationId>(from_range, operation->arrived_preds),
             "successors"_a = vector<OperationId>(from_range, operation->successors),
-            "sent_succs"_a = vector<OperationId>(from_range, operation->sent_succs));
+            "sent_succs"_a = vector<OperationId>(from_range, operation->sent_succs)
+        );
     }
     vector<py::dict> machine_dict;
     for (auto machine : this->machines | views::values)
     {
         auto materials = ranges::to<vector<py::dict>>(
-            machine->materials |
-            views::transform(
-                [](Product p)
-                { return py::dict("from"_a = p.from, "to"_a = p.to); }));
+            machine->materials | views::transform([](Product p)
+                                                  { return py::dict("from"_a = p.from, "to"_a = p.to); })
+        );
         auto products = ranges::to<vector<py::dict>>(
-            machine->products |
-            views::transform(
-                [](Product p)
-                { return py::dict("from"_a = p.from, "to"_a = p.to); }));
+            machine->products | views::transform([](Product p)
+                                                 { return py::dict("from"_a = p.from, "to"_a = p.to); })
+        );
         machine_dict.emplace_back(
             "id"_a = machine->id,
             "type"_a = machine->type,
@@ -224,17 +215,20 @@ py::dict Graph::get_state() const
             "working_operation"_a = machine->working_operation,
             "waiting_operation"_a = machine->waiting_operation,
             "materials"_a = materials,
-            "products"_a = products);
+            "products"_a = products
+        );
     }
     vector<py::dict> AGV_dict;
     for (auto AGV : this->AGVs | views::values)
     {
         auto loaded_item = AGV->loaded_item.transform(
             [](Product p)
-            { return py::dict("from"_a = p.from, "to"_a = p.to); });
+            { return py::dict("from"_a = p.from, "to"_a = p.to); }
+        );
         auto target_item = AGV->target_item.transform(
             [](Product p)
-            { return py::dict("from"_a = p.from, "to"_a = p.to); });
+            { return py::dict("from"_a = p.from, "to"_a = p.to); }
+        );
 
         AGV_dict.emplace_back(
             "id"_a = AGV->id,
@@ -244,7 +238,8 @@ py::dict Graph::get_state() const
             "target_machine"_a = AGV->target_machine,
             "loaded_item"_a = loaded_item,
             "target_item"_a = target_item,
-            "finish_timestamp"_a = AGV->finish_timestamp);
+            "finish_timestamp"_a = AGV->finish_timestamp
+        );
     }
     return py::dict(
         "inited"_a = this->inited,
@@ -257,7 +252,8 @@ py::dict Graph::get_state() const
         // "distances"_a = this->distances,
         "next_operation_id"_a = this->next_operation_id,
         "next_machine_id"_a = this->next_machine_id,
-        "next_AGV_id"_a = this->next_AGV_id);
+        "next_AGV_id"_a = this->next_AGV_id
+    );
 }
 
 shared_ptr<Graph> Graph::from_state(py::dict d)
@@ -274,7 +270,8 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         auto new_operation = make_shared<Operation>(
             operation_dict["id"].cast<OperationId>(),
             operation_dict["machine_type"].cast<MachineType>(),
-            operation_dict["process_time"].cast<float>());
+            operation_dict["process_time"].cast<float>()
+        );
         new_operation->status = static_cast<OperationStatus>(operation_dict["status"].cast<int>());
         new_operation->processing_machine = operation_dict["processing_machine"].cast<optional<MachineId>>();
         new_operation->finish_timestamp = operation_dict["finish_timestamp"].cast<float>();
@@ -291,21 +288,17 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
     for (auto machine_dict : d["machines"].cast<vector<py::dict>>())
     {
         auto pos_dict = machine_dict["pos"].cast<py::dict>();
-        auto new_machine = make_shared<Machine>(machine_dict["id"].cast<MachineId>(),
-                                                machine_dict["type"].cast<MachineType>(),
-                                                Position{pos_dict["x"].cast<float>(), pos_dict["y"].cast<float>()});
+        auto new_machine = make_shared<Machine>(machine_dict["id"].cast<MachineId>(), machine_dict["type"].cast<MachineType>(), Position{pos_dict["x"].cast<float>(), pos_dict["y"].cast<float>()});
         new_machine->status = static_cast<MachineStatus>(machine_dict["status"].cast<int>());
         new_machine->working_operation = machine_dict["working_operation"].cast<optional<OperationId>>();
-        new_machine->waiting_operation = machine_dict["waiting_operation"].cast<optional<OperationId>>();
+        new_machine->waiting_operation = machine_dict["waiting_operation"].cast<vector<OperationId>>();
         for (auto material_dict : machine_dict["materials"].cast<vector<py::dict>>())
         {
-            new_machine->materials.emplace(material_dict["from"].cast<OperationId>(),
-                                           material_dict["to"].cast<OperationId>());
+            new_machine->materials.emplace(material_dict["from"].cast<OperationId>(), material_dict["to"].cast<OperationId>());
         }
         for (auto product_dict : machine_dict["products"].cast<vector<py::dict>>())
         {
-            new_machine->products.emplace(product_dict["from"].cast<OperationId>(),
-                                          product_dict["to"].cast<OperationId>());
+            new_machine->products.emplace(product_dict["from"].cast<OperationId>(), product_dict["to"].cast<OperationId>());
         }
         res->machines[new_machine->id] = new_machine;
     }
@@ -314,7 +307,8 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         auto new_AGV = make_shared<AGV>(
             AGV_dict["id"].cast<AGVId>(),
             AGV_dict["speed"].cast<float>(),
-            AGV_dict["position"].cast<MachineId>());
+            AGV_dict["position"].cast<MachineId>()
+        );
         new_AGV->status = static_cast<AGVStatus>(AGV_dict["status"].cast<int>());
         new_AGV->speed = AGV_dict["speed"].cast<float>();
         new_AGV->position = AGV_dict["position"].cast<MachineId>();
@@ -322,10 +316,12 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         new_AGV->finish_timestamp = AGV_dict["finish_timestamp"].cast<float>();
         new_AGV->loaded_item = AGV_dict["loaded_item"].cast<optional<py::dict>>().transform(
             [](py::dict d)
-            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; });
+            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; }
+        );
         new_AGV->target_item = AGV_dict["target_item"].cast<optional<py::dict>>().transform(
             [](py::dict d)
-            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; });
+            { return Product{d["from"].cast<OperationId>(), d["to"].cast<OperationId>()}; }
+        );
         res->AGVs[new_AGV->id] = new_AGV;
         if (new_AGV->status != AGVStatus::idle)
         {
@@ -363,6 +359,21 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
     res->next_AGV_id = d["next_AGV_id"].cast<AGVId>();
 
     return res;
+}
+
+vector<OperationId> Graph::get_operations_id() const
+{
+    return this->operations | views::keys | ranges::to<vector<OperationId>>();
+}
+
+vector<MachineId> Graph::get_machines_id() const
+{
+    return this->machines | views::keys | ranges::to<vector<OperationId>>();
+}
+
+vector<AGVId> Graph::get_AGVs_id() const
+{
+    return this->AGVs | views::keys | ranges::to<vector<OperationId>>();
 }
 
 OperationId Graph::add_operation(MachineType type, float process_time)
@@ -414,7 +425,8 @@ OperationId Graph::insert_operation(
     MachineType type,
     float process_time,
     optional<OperationId> predecessor,
-    optional<OperationId> successor)
+    optional<OperationId> successor
+)
 {
     assert(!(predecessor.has_value() && successor.has_value()));
     if (this->operations.size() == 2)
@@ -754,30 +766,66 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     return ret;
 }
 
-void Graph::init()
-{
-    assert(!this->inited);
-    auto begin_operation = this->operations.at(this->begin_operation_id);
-    begin_operation->status = OperationStatus::finished;
-    auto dummy_machine = this->machines.at(this->dummy_machine_id);
-    for (OperationId id : begin_operation->successors)
-    {
-        this->operations.at(id)->status = OperationStatus::unscheduled;
-        dummy_machine->products.emplace(Product{this->begin_operation_id, id});
-    }
-    this->operations.at(this->end_operation_id)->status = OperationStatus::blocked;
-    this->timestamp = 0;
-    this->inited = true;
-}
-
 shared_ptr<Graph> Graph::copy() const
 {
     return make_shared<Graph>(*this);
 }
 
+shared_ptr<Graph> Graph::reset() const
+{
+    auto ret = this->copy();
+    if (!ret->inited)
+    {
+        return ret;
+    }
+    for (auto operation : ret->operations | views::values)
+    {
+        operation->status = OperationStatus::blocked;
+        operation->processing_machine = nullopt;
+        operation->finish_timestamp = 0;
+    }
+    for (auto machine : ret->machines | views::values)
+    {
+        machine->status = MachineStatus::idle;
+        machine->working_operation = nullopt;
+    }
+    for (auto AGV : ret->AGVs | views::values)
+    {
+        AGV->status = AGVStatus::idle;
+        AGV->target_machine = AGV->position;
+        AGV->finish_timestamp = 0;
+        AGV->loaded_item = nullopt;
+        AGV->target_item = nullopt;
+    }
+    ret->processing_operations.clear();
+    ret->moving_AGVs.clear();
+    ret->timestamp = 0;
+    ret->inited = false;
+    return ret;
+}
+
+shared_ptr<Graph> Graph::init() const
+{
+    assert(!this->inited);
+    auto ret = this->copy();
+    auto begin_operation = ret->operations.at(ret->begin_operation_id);
+    begin_operation->status = OperationStatus::finished;
+    auto dummy_machine = ret->machines.at(ret->dummy_machine_id);
+    for (OperationId id : begin_operation->successors)
+    {
+        ret->operations.at(id)->status = OperationStatus::unscheduled;
+        dummy_machine->products.emplace(Product{ret->begin_operation_id, id});
+    }
+    ret->operations.at(ret->end_operation_id)->status = OperationStatus::blocked;
+    ret->timestamp = 0;
+    ret->inited = true;
+    return ret;
+}
+
 RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature(shared_ptr<Operation> operation) const
 {
     float status_is_blocked = operation->status == OperationStatus::blocked ? 1 : 0;
+    float status_is_unscheduled = operation->status == OperationStatus::unscheduled ? 1 : 0;
     float status_is_waiting = operation->status == OperationStatus::waiting ? 1 : 0;
     float status_is_processing = operation->status == OperationStatus::processing ? 1 : 0;
     float status_is_finished = operation->status == OperationStatus::finished ? 1 : 0;
@@ -793,13 +841,15 @@ RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature
 
     return {
         status_is_blocked,
+        status_is_unscheduled,
         status_is_waiting,
         status_is_processing,
         status_is_finished,
         total_process_time,
         rest_process_time,
         total_product,
-        rest_pruduct};
+        rest_pruduct
+    };
 }
 
 RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(shared_ptr<Machine> machine) const
@@ -809,16 +859,28 @@ RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(sha
     float status_is_working = machine->status == MachineStatus::working;
 
     float rest_process_time = machine->status == MachineStatus::working
-                                  ? (this->operations.at(machine->working_operation.value())->finish_timestamp - this->timestamp)
+                                  ? (this->operations.at(machine->working_operation.value())
+                                         ->finish_timestamp
+                                     - this->timestamp)
                                   : 0;
 
-    float same_type_count = ranges::count_if(this->machines | views::values, [this, machine](auto other)
-                                             { return other->type == machine->type; });
-    auto processable_operations = this->operations | views::values | views::filter([this, machine](auto op)
-                                                                                   { return op->machine_type == machine->type; });
+    float same_type_count = ranges::count_if(
+        this->machines | views::values,
+        [this, machine](auto other)
+        { return other->type == machine->type; }
+    );
+    auto processable_operations = this->operations
+                                  | views::values
+                                  | views::filter(
+                                      [this, machine](auto op)
+                                      { return op->machine_type == machine->type; }
+                                  );
     float processable_operation_count = ranges::distance(processable_operations);
-    float rest_processable_operation_count = ranges::count_if(processable_operations, [](auto op)
-                                                              { return op->status < OperationStatus::processing; });
+    float rest_processable_operation_count = ranges::count_if(
+        processable_operations,
+        [](auto op)
+        { return op->status < OperationStatus::processing; }
+    );
 
     return {
         status_is_idle,
@@ -827,7 +889,8 @@ RepeatedTuple<float, Graph::machine_feature_size> Graph::get_machine_feature(sha
         rest_process_time,
         same_type_count,
         processable_operation_count,
-        rest_processable_operation_count};
+        rest_processable_operation_count
+    };
 }
 RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<AGV> AGV) const
 {
@@ -838,11 +901,7 @@ RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<
 
     float rest_act_time = AGV->status == AGVStatus::idle ? 0 : AGV->finish_timestamp - this->timestamp;
 
-    return {status_is_idle,
-            status_is_moving,
-            status_is_picking,
-            status_is_transporting,
-            rest_act_time};
+    return {status_is_idle, status_is_moving, status_is_picking, status_is_transporting, rest_act_time};
 }
 
 tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
@@ -852,13 +911,21 @@ tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
     auto feature = make_shared<GraphFeature>();
     auto mapper = make_shared<IdIdxMapper>();
 
+    float total_task = 0;
+    float finished_task = 0;
+
     feature->operation_features.resize(this->operations.size());
     auto operations_with_idx = this->operations | views::values | views::enumerate;
     for (auto [i, operation] : operations_with_idx)
     {
         feature->operation_features[i] = this->get_operation_feature(operation);
         mapper->operation[operation->id] = static_cast<size_t>(i);
+
+        total_task += operation->predecessors.size();
+        finished_task += operation->arrived_preds.size();
     }
+    feature->global_feature = make_tuple(this->timestamp, total_task, finished_task / total_task);
+    static_assert(tuple_size<decltype(feature->global_feature)>() == Graph::global_feature_size);
 
     feature->machine_features.resize(this->machines.size());
     auto machine_with_idx = this->machines | views::values | views::enumerate;
@@ -871,12 +938,21 @@ tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
         if (machine->working_operation.has_value())
         {
             auto operation = this->operations.at(machine->working_operation.value());
-            feature->processing.emplace_back(i, mapper->operation.at(operation->id), operation->finish_timestamp - this->timestamp);
+            feature->processing.emplace_back(
+                i,
+                mapper->operation.at(operation->id),
+                operation->finish_timestamp - this->timestamp
+            );
         }
-        if (machine->waiting_operation.has_value())
+        for(auto operation_id : machine->waiting_operation)
         {
-            auto operation = this->operations.at(machine->waiting_operation.value());
-            feature->waiting.emplace_back(i, mapper->operation.at(machine->waiting_operation.value()), operation->predecessors.size(), operation->arrived_preds.size());
+            auto operation = this->operations.at(operation_id);
+            feature->waiting.emplace_back(
+                i,
+                mapper->operation.at(operation_id),
+                operation->predecessors.size(),
+                operation->arrived_preds.size()
+            );
         }
     }
 
@@ -924,10 +1000,24 @@ tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
     return make_tuple(feature, mapper);
 }
 
+tuple<size_t, size_t> Graph::progress() const
+{
+    size_t total = 0;
+    size_t finished = 0;
+
+    for(auto operation : this->operations | views::values)
+    {
+        total += operation->predecessors.size();
+        finished += operation->arrived_preds.size();
+    }
+    return {finished, total};
+}
+
 bool Graph::finished() const
 {
     return this->operations.at(this->end_operation_id)->status == OperationStatus::finished;
 }
+
 
 float Graph::finish_time_lower_bound() const
 {
@@ -940,6 +1030,10 @@ float Graph::finish_time_lower_bound() const
     {
         for (auto [tid, to] : this->machines)
         {
+            if (fid == tid)
+            {
+                continue;
+            }
             float distance = this->distances.at(fid).at(tid);
             auto [iter, new_add] = min_type_distance.try_emplace({from->type, to->type}, distance);
             if (!new_add)
@@ -949,6 +1043,7 @@ float Graph::finish_time_lower_bound() const
         }
         type_count.try_emplace(from->type, 0).first->second++;
     }
+    
     for (auto operation : this->operations | views::values)
     {
 
@@ -982,23 +1077,17 @@ float Graph::finish_time_lower_bound() const
         }
     }
 
-    float max_time = 0;
-    for (auto [type, total_time] : remain_process_time)
-    {
-        max_time = max(max_time, total_time / type_count.at(type));
-    }
-
+ 
     float total_speed = 0;
     for (auto AGV : this->AGVs | views::values)
     {
         total_speed += AGV->speed;
     }
-    max_time = max(max_time, remain_transport_distance / total_speed);
 
-    return this->timestamp + max_time;
+    return this->timestamp + remain_transport_distance / total_speed;
 }
 
-vector<Action> Graph::get_available_actions() const
+vector<Action> Graph::get_available_actions()
 {
     assert(this->inited);
 
@@ -1008,14 +1097,9 @@ vector<Action> Graph::get_available_actions() const
         ret.emplace_back(ActionType::wait);
     }
 
-    vector<shared_ptr<Machine>> transportable_machines;
     vector<pair<shared_ptr<Machine>, Product>> pickable_products;
     for (auto [id, machine] : this->machines)
     {
-        if (!machine->waiting_operation.has_value())
-        {
-            transportable_machines.emplace_back(machine);
-        }
         if (!machine->products.empty())
         {
             for (auto product : machine->products)
@@ -1047,7 +1131,7 @@ vector<Action> Graph::get_available_actions() const
             }
             else
             {
-                for (auto machine : transportable_machines)
+                for (auto machine : this->machines | views::values)
                 {
                     if (machine->type == operation->machine_type)
                     {
@@ -1124,34 +1208,40 @@ void Graph::act_transport(AGVId id, MachineId target)
     assert(target_operation->predecessors.contains(AGV->loaded_item->from));
     assert(target_operation->machine_type == target_machine->type);
 
-    if (target_machine->waiting_operation.has_value())
+    if (!ranges::contains(target_machine->waiting_operation, target_operation->id))
     {
-        if (target_machine->working_operation.has_value())
+        assert(!target_operation->processing_machine.has_value());
+        assert(target_operation->status <= OperationStatus::unscheduled);
+
+        if (!target_machine->waiting_operation.empty())
         {
-            assert(target_machine->status == MachineStatus::working);
+            if (target_machine->working_operation.has_value())
+            {
+                assert(target_machine->status == MachineStatus::working);
+            }
+            else
+            {
+                assert(target_machine->status == MachineStatus::waiting_material);
+            }
         }
         else
         {
-            assert(target_machine->status == MachineStatus::waiting_material);
+            if (target_machine->status == MachineStatus::idle)
+            {
+                target_machine->status = MachineStatus::waiting_material;
+            }
         }
-        assert(target_machine->waiting_operation == target_operation->id);
-        assert(target_operation->status <= OperationStatus::waiting);
-        assert(target_operation->processing_machine == target_machine->id);
-    }
-    else
-    {
-        assert(target_operation->status <= OperationStatus::unscheduled);
-        assert(!target_operation->processing_machine.has_value());
-        if (target_machine->status == MachineStatus::idle)
-        {
-            target_machine->status = MachineStatus::waiting_material;
-        }
-        target_machine->waiting_operation = target_operation->id;
+
+        target_machine->waiting_operation.emplace_back(target_operation->id);
+        target_operation->processing_machine = target_machine->id;
         if (target_operation->status == OperationStatus::unscheduled)
         {
             target_operation->status = OperationStatus::waiting;
         }
-        target_operation->processing_machine = target_machine->id;
+    }
+    else
+    {
+        assert(target_operation->status <= OperationStatus::waiting);
     }
 
     AGV->target_machine = target;
@@ -1176,8 +1266,7 @@ void Graph::act_wait()
         nearest_AGV_finish_time = this->AGVs.at(this->moving_AGVs.top())->finish_timestamp;
     }
 
-    if (nearest_operation_finish_time != numeric_limits<float>::max() &&
-        nearest_operation_finish_time <= nearest_AGV_finish_time)
+    if (nearest_operation_finish_time != numeric_limits<float>::max() && nearest_operation_finish_time <= nearest_AGV_finish_time)
     {
         wait_operation();
     }
@@ -1196,6 +1285,7 @@ shared_ptr<Graph> Graph::act(Action action) const
     assert(this->inited);
 
     auto ret = this->copy();
+
     switch (action.type)
     {
     case ActionType::move:
@@ -1222,15 +1312,15 @@ tuple<vector<shared_ptr<Graph>>, vector<float>> Graph::batch_step(const vector<s
 {
     auto pairs = views::zip(vector(envs), vector<float>(envs.size(), 0), actions) | ranges::to<vector>();
 
-    for_each(execution::par,
-             pairs.begin(), pairs.end(),
-             [](tuple<shared_ptr<Graph>, float, shared_ptr<Action>> &item)
+    for_each(execution::par, pairs.begin(), pairs.end(), [](tuple<shared_ptr<Graph>, float, shared_ptr<Action>> &item)
              {
                  auto &[env, lb, action] = item;
                  env = env->act(*action);
-                 lb = env->finish_time_lower_bound();
-             });
-    return make_tuple(pairs | views::elements<0> | ranges::to<vector>(), pairs | views::elements<1> | ranges::to<vector>());
+                 lb = env->finish_time_lower_bound(); });
+    return make_tuple(
+        pairs | views::elements<0> | ranges::to<vector>(),
+        pairs | views::elements<1> | ranges::to<vector>()
+    );
 }
 
 void Graph::wait_operation()
@@ -1265,24 +1355,29 @@ void Graph::wait_operation()
         }
     }
 
-    if (machine->waiting_operation.has_value())
+    if (!machine->waiting_operation.empty())
     {
         machine->status = MachineStatus::waiting_material;
-        auto operation = this->operations.at(machine->waiting_operation.value());
-        assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
-        if (operation->status == OperationStatus::waiting && ranges::all_of(operation->predecessors, [machine](auto id)
-                                                                            { return machine->materials.contains(Product{id, machine->waiting_operation.value()}); }))
+        for (auto operation_id : machine->waiting_operation)
         {
-            for (auto p_id : operation->predecessors)
+            auto operation = this->operations.at(operation_id);
+            assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
+            if (operation->status == OperationStatus::waiting
+                && ranges::all_of(operation->predecessors, [machine, operation_id](auto id)
+                                  { return machine->materials.contains(Product{id, operation_id}); }))
             {
-                machine->materials.erase(Product{p_id, operation->id});
+                for (auto p_id : operation->predecessors)
+                {
+                    machine->materials.erase(Product{p_id, operation->id});
+                }
+                machine->working_operation = operation_id;
+                machine->waiting_operation.erase(ranges::find(machine->waiting_operation, operation_id));
+                machine->status = MachineStatus::working;
+                operation->status = OperationStatus::processing;
+                operation->finish_timestamp = this->timestamp + operation->process_time;
+                this->processing_operations.push(operation->id);
+                break;
             }
-            machine->working_operation = machine->waiting_operation;
-            machine->waiting_operation = nullopt;
-            machine->status = MachineStatus::working;
-            operation->status = OperationStatus::processing;
-            operation->finish_timestamp = this->timestamp + operation->process_time;
-            this->processing_operations.push(operation->id);
         }
     }
 }
@@ -1328,7 +1423,7 @@ void Graph::wait_AGV()
     {
         assert(AGV->loaded_item.has_value());
         auto machine = this->machines.at(AGV->target_machine);
-        assert(machine->waiting_operation == AGV->loaded_item->to);
+        assert(ranges::contains(machine->waiting_operation, AGV->loaded_item->to));
         assert(machine->status == MachineStatus::waiting_material || machine->status == MachineStatus::working);
         auto operation = this->operations.at(AGV->loaded_item->to);
         assert(operation->status == OperationStatus::blocked || operation->status == OperationStatus::waiting);
@@ -1352,8 +1447,8 @@ void Graph::wait_AGV()
                 machine->materials.erase({p_id, operation->id});
             }
             machine->status = MachineStatus::working;
-            machine->working_operation = machine->waiting_operation;
-            machine->waiting_operation = nullopt;
+            machine->working_operation = operation->id;
+            machine->waiting_operation.erase(ranges::find(machine->waiting_operation, operation->id));
 
             operation->status = OperationStatus::processing;
             operation->finish_timestamp = this->timestamp + operation->process_time;

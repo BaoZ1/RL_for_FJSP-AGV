@@ -48,7 +48,8 @@ struct Machine
     MachineType type;
     Position pos;
     MachineStatus status;
-    optional<OperationId> working_operation, waiting_operation;
+    optional<OperationId> working_operation;
+    vector<OperationId> waiting_operation;
     set<Product> materials, products;
 };
 
@@ -104,7 +105,8 @@ public:
     static const MachineId dummy_machine_id = 0;
     static const MachineType dummy_machine_type = 0;
 
-    static const size_t operation_feature_size = 8;
+    static const size_t global_feature_size = 3;
+    static const size_t operation_feature_size = 9;
     static const size_t machine_feature_size = 7;
     static const size_t AGV_feature_size = 5;
 
@@ -114,6 +116,10 @@ public:
 
     py::dict get_state() const;
     static shared_ptr<Graph> from_state(py::dict);
+
+    vector<OperationId> get_operations_id() const;
+    vector<MachineId> get_machines_id() const;
+    vector<AGVId> get_AGVs_id() const;
 
     OperationId add_operation(MachineType, float);
     void add_relation(OperationId, OperationId);
@@ -141,19 +147,22 @@ public:
 
     static shared_ptr<Graph> rand_generate(GenerateParam);
 
-    void init();
-
     shared_ptr<Graph> copy() const;
+
+    shared_ptr<Graph> reset() const;
+    shared_ptr<Graph> init() const;
 
     RepeatedTuple<float, operation_feature_size> get_operation_feature(shared_ptr<Operation>) const;
     RepeatedTuple<float, machine_feature_size> get_machine_feature(shared_ptr<Machine>) const;
     RepeatedTuple<float, AGV_feature_size> get_AGV_feature(shared_ptr<AGV>) const;
     tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> features() const;
 
+    tuple<size_t, size_t> progress() const;
     bool finished() const;
+
     float finish_time_lower_bound() const;
 
-    vector<Action> get_available_actions() const;
+    vector<Action> get_available_actions();
 
     bool operation_time_compare(OperationId, OperationId);
     bool AGV_time_compare(AGVId, AGVId);
@@ -191,6 +200,7 @@ protected:
 
 struct GraphFeature
 {
+    tuple<float, float, float> global_feature; // timestamp, total_task, finish_rate
     vector<RepeatedTuple<float, Graph::operation_feature_size>> operation_features;
     vector<tuple<size_t, size_t>> predecessor_idx; // predecessor_idx, successor_idx;
     vector<tuple<size_t, size_t>> successor_idx;   // successor_idx, predecessor_idx

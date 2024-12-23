@@ -3,7 +3,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import IterableDataset, DataLoader, Dataset
 from torch_geometric.data import HeteroData, Batch, Data
-from FJSP_env import GraphFeature, Action
+from FJSP_env import GraphFeature, Action, Observation
 from dataclasses import dataclass
 
 
@@ -51,6 +51,8 @@ class HeteroGraph(HeteroData):
             return -1
 
         if "attr" in key:
+            if key == "global_attr":
+                return None
             return -2
 
         return 0
@@ -58,70 +60,7 @@ class HeteroGraph(HeteroData):
 
 def build_graph(feature: GraphFeature):
     graph = HeteroGraph()
-    graph["operation"].x = torch.tensor(feature.operation_features)
-    graph["machine"].x = torch.tensor(feature.machine_features)
-    graph["AGV"].x = torch.tensor(feature.AGV_features)
-
-    if len(feature.predecessor_idx):
-        graph["operation", "predecessor", "operation"].edge_index = (
-            contiguous_transpose(torch.tensor(feature.predecessor_idx, dtype=torch.int))
-        )
-    if len(feature.successor_idx):
-        graph["operation", "successor", "operation"].edge_index = contiguous_transpose(
-            torch.tensor(feature.successor_idx, dtype=torch.int)
-        )
-    if len(feature.processable_idx):
-        graph["machine", "processable", "operation"].edge_index = contiguous_transpose(
-            torch.tensor(feature.processable_idx, dtype=torch.int)
-        )
-    if len(feature.processing):
-        graph["machine", "processing", "operation"].edge_index = contiguous_transpose(
-            torch.tensor([[x[0], x[1]] for x in feature.processing], dtype=torch.int)
-        )
-        graph["machine", "processing", "operation"].edge_attr = contiguous_transpose(
-            torch.tensor([[x[2]] for x in feature.processing])
-        )
-    if len(feature.waiting):
-        graph["machine", "waiting", "operation"].edge_index = contiguous_transpose(
-            torch.tensor([[x[0], x[1]] for x in feature.waiting], dtype=torch.int)
-        )
-        graph["machine", "waiting", "operation"].edge_attr = contiguous_transpose(
-            torch.tensor([[x[2], x[3]] for x in feature.waiting])
-        )
-    if len(feature.AGV_position):
-        graph["AGV", "position", "machine"].edge_index = contiguous_transpose(
-            torch.tensor(feature.AGV_position, dtype=torch.int)
-        )
-    if len(feature.AGV_target):
-        graph["AGV", "target", "machine"].edge_index = contiguous_transpose(
-            torch.tensor([[x[0], x[1]] for x in feature.AGV_target], dtype=torch.int)
-        )
-        graph["AGV", "target", "machine"].edge_attr = contiguous_transpose(
-            torch.tensor([[x[2]] for x in feature.AGV_target])
-        )
-    if len(feature.AGV_loaded):
-        graph["AGV", "load_from", "operation"].edge_index = contiguous_transpose(
-            torch.tensor([[x[0], x[1]] for x in feature.AGV_loaded], dtype=torch.int)
-        )
-        graph["AGV", "load_to", "operation"].edge_index = contiguous_transpose(
-            torch.tensor([[x[0], x[2]] for x in feature.AGV_loaded], dtype=torch.int)
-        )
-
-    for edge in graph.edge_types:
-        src, name, dst = edge
-        if name in ["predecessor", "successor"]:
-            continue
-        graph[dst, f"{name}_rev", src].edge_index = (
-            graph[edge].edge_index.flip(0).contiguous()
-        )
-        if edge in Metadata.edge_attrs:
-            graph[dst, f"{name}_rev", src].edge_attr = graph[edge].edge_attr
-
-    return graph
-
-
-def build_graph(feature: GraphFeature):
-    graph = HeteroGraph()
+    graph.global_attr = torch.tensor(feature.global_feature)
     graph["operation"].x = torch.tensor(feature.operation_features)
     graph["machine"].x = torch.tensor(feature.machine_features)
     graph["AGV"].x = torch.tensor(feature.AGV_features)
@@ -207,43 +146,66 @@ def get_offsets(batch: Batch) -> dict[str, dict[int, int]]:
     return ret
 
 
+
 @dataclass
-class ReplayItem[T]:
-    state: T
-    action: Action
-    reward: float
-    done: bool
-    next_state: T
+class SequenceReplayItem:
+    states: list[Observation]
+    action_idxs: list[int]
+    rewards: list[float]
+    dones: list[bool]
+    next_states: list[Observation]
 
 
 class ReplayBuffer[T]:
 
-    def __init__(self, max_len: int = 1000):
-        self.buffer: list[ReplayItem[T]] = []
+    def __init__(self, seq_len: int, max_len: int = 1000):
+        self.buffer: list[SequenceReplayItem] = []
         self.max_len = max_len
+
+        self.seq_len = seq_len
+        self.temp_buffer: list[
+            list[tuple[Observation, int, float, bool, Observation]]
+        ] = []
 
     def append(
         self,
-        state: T,
-        action: Action,
-        reward: float,
-        done: bool,
-        next_state: T,
+        states: list[Observation],
+        action_idxs: list[int],
+        rewards: list[float],
+        dones: list[bool],
+        next_states: list[Observation],
     ):
-        self.buffer.append(
-            ReplayItem(
-                state,
-                action,
-                reward,
-                done,
-                next_state,
-            )
-        )
-        if len(self.buffer) > self.max_len:
-            self.buffer.pop(0)
+        if len(self.temp_buffer) != 0:
+            assert len(states) == len(self.temp_buffer)
+        else:
+            for _ in range(len(states)):
+                self.temp_buffer.append([])
+        for temp_buffer, data in zip(
+            self.temp_buffer,
+            zip(
+                states,
+                action_idxs,
+                rewards,
+                dones,
+                next_states,
+            ),
+        ):
+            temp_buffer.append(data)
+            if len(temp_buffer) == self.seq_len:
+                self.buffer.append(
+                    SequenceReplayItem(
+                        *[list(item) for item in zip(*temp_buffer, strict=True)]
+                    )
+                )
+                temp_buffer.pop(0)
+                if len(self.buffer) > self.max_len:
+                    self.buffer.pop(0)
+            assert type(data[3]) == bool
+            if data[3]:
+                temp_buffer.clear()
 
-    def sample(self, num: int) -> list[ReplayItem[T]]:
-        assert len(self.buffer) > num
+    def sample(self, num: int) -> list[SequenceReplayItem]:
+        assert len(self.buffer) >= num
 
         return np.random.choice(self.buffer, num, False)
 
