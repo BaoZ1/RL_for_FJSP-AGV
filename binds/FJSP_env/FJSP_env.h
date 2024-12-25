@@ -49,7 +49,7 @@ struct Machine
     Position pos;
     MachineStatus status;
     optional<OperationId> working_operation;
-    vector<OperationId> waiting_operation;
+    vector<OperationId> waiting_operations;
     set<Product> materials, products;
 };
 

@@ -22,12 +22,12 @@ import lightning as L
 from lightning.pytorch.trainer.states import RunningStage
 from collections.abc import Callable
 from tqdm import tqdm
-from typing import Self
+from typing import Self, AsyncGenerator, Any, Literal
 import math
 from itertools import chain, batched, count
 from einops import rearrange
 from einops.layers.torch import Rearrange
-
+import asyncio
 
 class ResidualLinear(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
@@ -953,7 +953,7 @@ class Agent(L.LightningModule):
 
     def __init__(
         self,
-        envs: Environment,
+        envs: Environment | None,
         lr: float,
         seq_len: int,
         buffer_size: int,
@@ -1025,17 +1025,13 @@ class Agent(L.LightningModule):
         torch.compile(self.value_prefix_net, fullgraph=True)
 
     def prepare_data(self):
+        assert self.envs is not None
         self.baseline, self.val_graphs = self.get_baseline(self.val_num)
         self.init_buffer()
 
     def get_baseline(self, env_count) -> tuple[np.ndarray, list[Graph]]:
         temp_envs = [
-            Environment(
-                1,
-                self.envs.generate_params,
-                False
-            )
-            for _ in range(env_count)
+            Environment(1, self.envs.generate_params, False) for _ in range(env_count)
         ]
         timestamps: list[float] = []
         graphs: list[Graph] = []
@@ -1446,21 +1442,21 @@ class Agent(L.LightningModule):
 
         return [ob.action_list[idx] for ob, idx in zip(obs, act_idxs)], act_idxs
 
-    def predict(
+    @torch.inference_mode()
+    async def predict(
         self,
-        graphs: list[Graph],
+        graph: Graph,
         sample_count: int,
         sim_count: int,
-        predict_num: int = 1,
+        predict_num: int,
     ):
         assert predict_num >= 1
-        init_graphs = [graph for graph in graphs for _ in range(predict_num)]
+        env = Environment.from_graphs([graph for _ in range(predict_num)])
         results: list[tuple[list[Graph], list[Action]]] = [
-            ([g], []) for g in init_graphs
+            ([g], []) for g in env.envs
         ]
-        env = Environment.from_graphs(init_graphs)
-        finished = [False] * len(init_graphs)
-        for i in count(1):
+        finished = [False] * len(env.envs)
+        for round_count in count(1):
             obs = env.observe()
             if len(obs) == 0:
                 break
@@ -1481,50 +1477,72 @@ class Agent(L.LightningModule):
                 if dones[list_idx]:
                     finished[i] = True
                 list_idx += 1
-            
+
             total_step = 0
             finished_step = 0
             for e in env.envs:
                 f, t = e.progress()
                 total_step += t
-                finished_step = f
-            if self.trainer.state.stage == RunningStage.VALIDATING:
-                bar = self.trainer.progress_bar_callback.val_progress_bar
-                bar.total = total_step
-                bar.n = finished_step
-                bar.refresh()
+                finished_step += f
+            total_step /= predict_num
+            finished_step /= predict_num
 
-        finish_timestamps = [
-            graph.get_timestamp()
-            for graph in env.envs
-        ]
-        best_idxs = [
-            np.argmin(timestamps)
-            for timestamps in batched(finish_timestamps, predict_num)
-        ]
-
-        return [
-            batched_results[np.argmin(idx)]
-            for idx, batched_results in zip(best_idxs, batched(results, predict_num))
-        ], [
-            timestamps[idx]
-            for idx, timestamps in zip(
-                best_idxs, batched(finish_timestamps, predict_num)
+            yield (
+                False,
+                {
+                    "round_count": round_count,
+                    "finished_step": finished_step,
+                    "total_step": total_step,
+                },
             )
-        ]
+            await asyncio.sleep(0)
+
+        result = results[np.argmin([graph.get_timestamp() for graph in env.envs])]
+        yield (
+            True,
+            {
+                "graph_states": result[0],
+                "actions": result[1],
+            },
+        )
 
     def validation_step(self, batch: list[Graph]):
-        _, timestamps = self.predict(
-            batch,
-            self.root_sample_count,
-            self.simulation_count,
-            self.val_predict_num,
+        env = Environment.from_graphs(
+            [graph for graph in batch for _ in range(self.val_predict_num)]
         )
+        while True:
+            obs = env.observe()
+            if len(obs) == 0:
+                break
+
+            actions, _ = self.single_step_predict(
+                obs,
+                self.root_sample_count,
+                self.simulation_count,
+            )
+            env.step(actions)
+
+            total_step = 0
+            finished_step = 0
+            for e in env.envs:
+                f, t = e.progress()
+                total_step += t
+                finished_step += f
+
+            bar = self.trainer.progress_bar_callback.val_progress_bar
+            bar.total = total_step
+            bar.n = finished_step
+            bar.refresh()
 
         self.log_dict(
             {
-                f"val/env_{idx}": (ts / self.baseline[idx])
-                for idx, ts in enumerate(timestamps)
+                f"val/env_{idx}": (np.mean(ts) / self.baseline[idx])
+                for idx, ts in enumerate(
+                    batched(
+                        [graph.get_timestamp() for graph in env.envs],
+                        self.val_predict_num,
+                    )
+                )
             },
             batch_size=len(batch),
         )

@@ -40,7 +40,7 @@ fn refresh_backend_pids(pids: &mut Vec<Pid>) {
 }
 
 #[tauri::command]
-fn launch_backend(app: tauri::AppHandle) -> Result<(), String> {
+async fn launch_backend(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<AppState>>();
     let mut state_data = state.lock().unwrap();
 

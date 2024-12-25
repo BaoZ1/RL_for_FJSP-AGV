@@ -38,8 +38,7 @@ export type EnvState = {
     operations: OperationState[]
     machines: MachineState[]
     AGVs: AGVState[]
-    paths: {[from: number]: {[to: number]: number[]}}
-    // distances: Record<number, Record<number, number>>
+    direct_paths: [number, number][]
     next_operation_id: number
     next_machine_id: number
     next_AGV_id: number

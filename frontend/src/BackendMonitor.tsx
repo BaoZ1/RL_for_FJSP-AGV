@@ -40,21 +40,28 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
   }, [])
 
   return (
-    <div className={className}>
-      <Button color="default" variant="solid" onClick={restart} loading={restarting}>重启</Button>
-      <List bordered css={css`
+    <div className={className} css={css`
+      height: 100%;
+    `}>
+      <Flex gap="small">
+        <Button color="default" variant="solid" onClick={restart} loading={restarting}>重启</Button>
+        <Button color="default" variant="filled" onClick={()=>setBackendMsgs([])}>清空</Button>
+      </Flex>
+      <div css={css`
+        height: 100%;
+        border: 1px solid gray;
+        border-radius: 10px;
+        padding: 5px;
         max-height: 280px; 
         overflow: auto;
         margin-top: 10px;
       `}>
-        {backendMsgs.map(({type, content}, idx) => (
-          <List.Item key={idx} css={css`
-            color: ${type === MsgType.error ? "red" : "black"};
-          `}>
+        {backendMsgs.map(({content}, idx) => (
+          <div key={idx} >
             {content}
-          </List.Item>
+          </div>
         ))}
-      </List>
+      </div>
     </div>
   );
 }

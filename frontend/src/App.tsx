@@ -11,14 +11,6 @@ import { ApiOutlined } from '@ant-design/icons';
 function App() {
   const [showBackendDrawer, setShowBackendDrawer] = useState(false)
 
-  useEffect(() => {
-    const p = invoke("launch_backend")
-    return () => {
-    //   p.then(() => invoke("close_backend"))
-    }
-  }, [])
-
-
   return (
     <div css={css`
         width: 100%;

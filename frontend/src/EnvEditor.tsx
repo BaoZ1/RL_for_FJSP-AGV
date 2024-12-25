@@ -510,7 +510,7 @@ const MachinePath: FC<{
 const MachineEditor: FC<{
   className?: string,
   states: MachineState[],
-  paths: { [from: number]: { [to: number]: number[] } },
+  paths: [number, number][],
   selected: number | null,
   onBackgroundClicked: () => void,
   onMachineClicked: (id: number) => void,
@@ -577,17 +577,16 @@ const MachineEditor: FC<{
           ))
         }
         {
-          Object.entries(props.paths).map(([f_id, tos]) => (
-            Object.entries(tos).filter(([t_id, path]) => f_id !== t_id && path.length == 1).map(([t_id, _]) => {
-              const pos1 = props.states.find((item) => item.id == parseInt(f_id))!.pos
-              const pos2 = props.states.find((item) => item.id == parseInt(t_id))!.pos
+          props.paths.map(([f_id, t_id]) => {
+            const pos1 = props.states.find((item) => item.id == f_id)!.pos
+            const pos2 = props.states.find((item) => item.id == t_id)!.pos
 
-              const dx = pos1.x - pos2.x
-              const dy = pos1.y - pos2.y
-              const len = Math.hypot(dx, dy) * scaleRatio
-              const rot = Math.PI - Math.atan2(dy, dx)
-              return (
-                <MachinePath key={`${f_id}-${t_id}`} css={css`
+            const dx = pos1.x - pos2.x
+            const dy = pos1.y - pos2.y
+            const len = Math.hypot(dx, dy) * scaleRatio
+            const rot = Math.PI - Math.atan2(dy, dx)
+            return (
+              <MachinePath key={`${f_id}-${t_id}`} css={css`
                     position: absolute;
                     width: ${len}px;
                     border: 1px solid black;
@@ -596,10 +595,9 @@ const MachineEditor: FC<{
                     left: ${pos1.x * scaleRatio}px;
                     bottom: ${pos1.y * scaleRatio}px;
                   `}
-                />
-              )
-            })
-          ))
+              />
+            )
+          })
         }
       </div>
     </div>
@@ -722,8 +720,8 @@ const AddOperationConfigForm: FC<{
         `}
       >
         <div css={css`
-            width: 20px;
-            height: 20px;
+            width: 40px;
+            height: 40px;
             border-radius: 50%;
             border: 2px dashed black;
             background-color: gray;
@@ -737,8 +735,8 @@ const AddOperationConfigForm: FC<{
           `}
         />
         <div css={css`
-            width: 40px;
-            height: 40px;
+            width: 20px;
+            height: 20px;
             border-radius: 50%;
             border: 2px solid black;
             background-color: gray;
@@ -756,8 +754,8 @@ const AddOperationConfigForm: FC<{
           `}
         />
         <div css={css`
-            width: 20px;
-            height: 20px;
+            width: 40px;
+            height: 40px;
             border-radius: 50%;
             border: 2px dashed black;
             background-color: gray;
@@ -982,7 +980,7 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                   <Splitter.Panel min="20%" collapsible>
                     <Splitter layout="vertical">
                       <Splitter.Panel defaultSize="70%">
-                        <MachineEditor states={envState.machines} paths={envState.paths}
+                        <MachineEditor states={envState.machines} paths={envState.direct_paths}
                           selected={selectedMachine}
                           onBackgroundClicked={() => setSelectedMachine(null)}
                           onMachineClicked={handelMachineClick}
