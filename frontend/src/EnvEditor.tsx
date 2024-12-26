@@ -414,13 +414,11 @@ const OperationEditor: FC<{
   return (
     <div className={props.className}
       onMouseDown={trackGraphDrag} onWheel={updateScale}
-      onClick={()=>{
-        if(!isDragging) {
-          console.log("GG");
-          
+      onClick={() => {
+        if (!isDragging) {
           props.onBackgroundClick()
         }
-      }} 
+      }}
       css={css`
         position: relative;
         overflow: hidden;
@@ -451,6 +449,7 @@ const OperationEditor: FC<{
 
 const MachineNode: FC<{
   className?: string,
+  state: MachineState,
   selected: boolean,
   onClick: () => void,
   onDrag: (dx: number, dy: number) => void
@@ -490,8 +489,17 @@ const MachineNode: FC<{
         border-radius: 50%;
         background-color: gray;
         border: 2px solid ${props.selected ? "red" : "black"};
+        display: flex;
+        justify-content: center;
+        align-items: center;
+
+        &:hover {
+          border-color: red;
+        }
       `}
-    ></div>
+    >
+      {props.state.id}
+    </div>
   )
 }
 
@@ -519,12 +527,15 @@ const MachineEditor: FC<{
   const [scaleRatio, setScaleRatio] = useState<number>(1)
   const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
 
+  const [isDragging, setIsDragging] = useState(false)
+
   const trackDrag = (e: MouseEvent) => {
     e.preventDefault()
     let prev_x = e.clientX
     let prev_y = e.clientY
 
     const handleMouseMove = (e: globalThis.MouseEvent) => {
+      setIsDragging(true)
       const dx = e.clientX - prev_x
       const dy = e.clientY - prev_y
       setOffset(({ x, y }) => ({ x: x + dx, y: y + dy }))
@@ -532,6 +543,7 @@ const MachineEditor: FC<{
       prev_y = e.clientY
     }
     const handleMouseUp = () => {
+      setTimeout(() => setIsDragging(false), 100)
       removeEventListener('mousemove', handleMouseMove)
       removeEventListener('mouseup', handleMouseUp)
     }
@@ -547,7 +559,11 @@ const MachineEditor: FC<{
 
   return (
     <div className={props.className} onMouseDown={trackDrag} onWheel={updateScale}
-      onClick={props.onBackgroundClicked} css={css`
+      onClick={()=>{
+        if(!isDragging) {
+          props.onBackgroundClicked()
+        }
+      }} css={css`
         position: relative;
         overflow: hidden;
       `}
@@ -563,7 +579,7 @@ const MachineEditor: FC<{
       `}>
         {
           props.states.map((state) => (
-            <MachineNode key={state.id} selected={state.id === props.selected}
+            <MachineNode key={state.id} state={state} selected={state.id === props.selected}
               onClick={() => props.onMachineClicked(state.id)}
               onDrag={(dx, dy) => props.onMachineDragged(state.id, dx / scaleRatio, dy / scaleRatio)}
               css={css`
@@ -656,6 +672,7 @@ const AGVNode: FC<{ state: AGVState }> = (props) => {
             border: 1px solid gray;
             background-color: white;
             border-radius: 5px;
+            z-index: 10;
           `}>
             12345679
             <div ref={arrowRef} css={css`
@@ -853,8 +870,12 @@ const RandParamConfigForm: FC<{
   )
 }
 
-const EnvEditor: FC<{ className?: string }> = ({ className }) => {
-  const [envState, setEnvState] = useState<EnvState | null>(null)
+const EnvEditor: FC<{
+  className?: string,
+  state: EnvState | null,
+  setState: React.Dispatch<React.SetStateAction<EnvState | null>>,
+  onStart: ()=>void,
+}> = ({ className, state, setState, onStart }) => {
 
   const [isRandModalOpen, setIsRandModalOpen] = useState(false)
   const [randParamsForm] = Form.useForm<GenerationParams>()
@@ -866,25 +887,22 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
     setIsAddOperationModalOpen(true)
   }
   const handelRemoveOperation = async (id: number) => {
-    setEnvState(await removeOperation(envState!, id))
+    setState(await removeOperation(state!, id))
   }
 
   const [selectedOperation, setSelectedOperation] = useState<number | null>(null)
   const [isOperationInfoModalOpen, setIsOperationInfoModalOpen] = useState(false)
   const [operationInfoForm] = Form.useForm<OperationState>()
   const handelOperationClick = async (id: number) => {
-    if (selectedOperation === null) {
-      setSelectedOperation(id)
-    }
-    else if (selectedOperation === id) {
+    if (selectedOperation === id) {
       setIsOperationInfoModalOpen(true)
     }
     else {
-
+      setSelectedOperation(id)
     }
   }
-  useEffect(()=>{
-    if(!isOperationInfoModalOpen) {
+  useEffect(() => {
+    if (!isOperationInfoModalOpen) {
       setSelectedOperation(null)
     }
   }, [isOperationInfoModalOpen])
@@ -898,12 +916,13 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
 
     }
     else {
-      setEnvState(await addPath(envState!, selectedMachine, id))
+      setState(await addPath(state!, selectedMachine, id))
       setSelectedMachine(null)
     }
   }
   const updateMachinePos = (id: number, dx: number, dy: number) => {
-    setEnvState((env) => {
+    setSelectedMachine(null)
+    setState((env) => {
       const ret = structuredClone(env!)
       const target = ret.machines.find((item) => item.id === id)!
       target.pos = { x: target.pos.x + dx, y: target.pos.y - dy }
@@ -930,14 +949,40 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
               <Button type="primary" onClick={async () => {
                 const path = await open()
                 if (path !== null) {
-                  setEnvState(await loadEnv(path))
+                  setState(await loadEnv(path))
                 }
-              }}>读取</Button>
-              <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
-              <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
-              <Button type="primary" shape="circle" onClick={async () => {
-                setEnvState(await randEnv(randParamsForm.getFieldsValue()))
-              }} icon={<RedoOutlined />} />
+              }}>
+                读取
+              </Button>
+              <Button type="primary" onClick={async () => setState(await newEnv())}>新建</Button>
+              <Space.Compact>
+                <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
+                <Button type="primary" icon={<RedoOutlined />}
+                  onClick={async () => { setState(await randEnv(randParamsForm.getFieldsValue())) }}
+                />
+              </Space.Compact>
+              <Button type="primary" disabled={state === null} onClick={onStart} css={css`
+                margin-left: 10px;
+                &:not([disabled]) {
+                  > span {
+                    position: relative;
+                  }
+
+                  &::before {
+                    content: '';
+                    background: linear-gradient(135deg, #6253e1, #04befe);
+                    position: absolute;
+                    inset: -1px;
+                    opacity: 1;
+                    transition: all 0.3s;
+                    border-radius: inherit;
+                  }
+
+                  &:hover::before {
+                    opacity: 0;
+                  }
+                }
+              `}>开始</Button>
             </Flex>
           </Card>
         </Layout.Header>
@@ -953,20 +998,20 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
             }
           `}>
             {
-              envState === null
+              state === null
                 ?
                 <Flex justify="center" align="center" css={css`
                     height: 100%;
                   `}
                 >
                   <Empty>
-                    <Button type="primary" onClick={async () => setEnvState(await newEnv())}>新建</Button>
+                    <Button type="primary" onClick={async () => setState(await newEnv())}>新建</Button>
                   </Empty>
                 </Flex>
                 :
                 <Splitter>
                   <Splitter.Panel defaultSize="70%">
-                    <OperationEditor states={envState.operations} selectedOperation={selectedOperation}
+                    <OperationEditor states={state.operations} selectedOperation={selectedOperation}
                       onBackgroundClick={() => setSelectedOperation(null)}
                       onOperationClick={handelOperationClick}
                       onAddOperation={handelAddOperation}
@@ -980,7 +1025,7 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                   <Splitter.Panel min="20%" collapsible>
                     <Splitter layout="vertical">
                       <Splitter.Panel defaultSize="70%">
-                        <MachineEditor states={envState.machines} paths={envState.direct_paths}
+                        <MachineEditor states={state.machines} paths={state.direct_paths}
                           selected={selectedMachine}
                           onBackgroundClicked={() => setSelectedMachine(null)}
                           onMachineClicked={handelMachineClick}
@@ -995,7 +1040,7 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
                           padding: 15px;
                         `}>
                           {
-                            envState.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
+                            state.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
                           }
                           <div css={css`
                             width: 50px;
@@ -1029,17 +1074,17 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
           </Card>
         </Layout.Content>
       </Layout>
-      <Modal title="添加工序" open={isAddOperationModalOpen} footer={null} 
+      <Modal title="添加工序" open={isAddOperationModalOpen} footer={null}
         onCancel={() => setIsAddOperationModalOpen(false)}
       >
-        <AddOperationConfigForm formData={addOperationParamsForm} machines={envState?.machines}
+        <AddOperationConfigForm formData={addOperationParamsForm} machines={state?.machines}
           onFinish={async () => {
             setIsAddOperationModalOpen(false)
-            setEnvState(await addOperation(envState!, addOperationParamsForm.getFieldsValue(true)))
+            setState(await addOperation(state!, addOperationParamsForm.getFieldsValue(true)))
           }}
         />
       </Modal>
-      <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null} 
+      <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null}
         onCancel={() => setIsOperationInfoModalOpen(false)}
       >
         <OperationInfoForm formData={operationInfoForm}
@@ -1052,7 +1097,7 @@ const EnvEditor: FC<{ className?: string }> = ({ className }) => {
         <RandParamConfigForm formData={randParamsForm}
           onFinish={async (values) => {
             setIsRandModalOpen(false)
-            setEnvState(await randEnv(values))
+            setState(await randEnv(values))
           }}
         />
       </Modal>

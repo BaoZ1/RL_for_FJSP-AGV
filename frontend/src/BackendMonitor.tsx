@@ -44,7 +44,7 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
       height: 100%;
     `}>
       <Flex gap="small">
-        <Button color="default" variant="solid" onClick={restart} loading={restarting}>重启</Button>
+        <Button color="default" variant="solid" onClick={restart} loading={restarting}>启动 / 重启</Button>
         <Button color="default" variant="filled" onClick={()=>setBackendMsgs([])}>清空</Button>
       </Flex>
       <div css={css`

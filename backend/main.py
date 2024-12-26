@@ -60,7 +60,16 @@ async def get_local_save(
 async def get_rand_env(
     params: Annotated[GenerationParamModel, Query()],
 ) -> EnvState:
-    return Graph.rand_generate(GenerateParam(**params.model_dump())).get_state()
+    return Graph.rand_generate(GenerateParam(**params.model_dump()))
+
+@app.put("/env/init")
+async def init_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
+    return graph.init()
+
+
+@app.put("/env/reset")
+async def reset_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
+    return graph.reset()
 
 
 @app.put("/operation/add")
@@ -72,7 +81,7 @@ async def add_operation(
     succ: Annotated[int | None, Query()] = None,
 ) -> EnvState:
     graph.insert_operation(type, time, pred, succ)
-    return graph.get_state()
+    return graph
 
 
 @app.put("/operation/remove")
@@ -81,7 +90,7 @@ async def remove_operation(
     id: Annotated[int, Query()],
 ) -> EnvState:
     graph.remove_operation(id)
-    return graph.get_state()
+    return graph
 
 
 @app.put("/path/add")
@@ -91,7 +100,7 @@ async def add_path(
     b: Annotated[int, Query()],
 ) -> EnvState:
     graph.add_path(a, b)
-    return graph.get_state()
+    return graph
 
 
 @app.put("/path/remove")
@@ -101,7 +110,7 @@ async def remove_path(
     b: Annotated[int, Query()],
 ) -> EnvState:
     graph.remove_path(a, b)
-    return graph.get_state()
+    return graph
 
 
 @app.get("/model/list")
