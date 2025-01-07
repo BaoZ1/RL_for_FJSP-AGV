@@ -559,8 +559,8 @@ const MachineEditor: FC<{
 
   return (
     <div className={props.className} onMouseDown={trackDrag} onWheel={updateScale}
-      onClick={()=>{
-        if(!isDragging) {
+      onClick={() => {
+        if (!isDragging) {
           props.onBackgroundClicked()
         }
       }} css={css`
@@ -874,7 +874,7 @@ const EnvEditor: FC<{
   className?: string,
   state: EnvState | null,
   setState: React.Dispatch<React.SetStateAction<EnvState | null>>,
-  onStart: ()=>void,
+  onStart: () => void,
 }> = ({ className, state, setState, onStart }) => {
 
   const [isRandModalOpen, setIsRandModalOpen] = useState(false)
@@ -998,8 +998,7 @@ const EnvEditor: FC<{
             }
           `}>
             {
-              state === null
-                ?
+              state === null ? (
                 <Flex justify="center" align="center" css={css`
                     height: 100%;
                   `}
@@ -1008,7 +1007,7 @@ const EnvEditor: FC<{
                     <Button type="primary" onClick={async () => setState(await newEnv())}>新建</Button>
                   </Empty>
                 </Flex>
-                :
+              ) : (
                 <Splitter>
                   <Splitter.Panel defaultSize="70%">
                     <OperationEditor states={state.operations} selectedOperation={selectedOperation}
@@ -1070,6 +1069,7 @@ const EnvEditor: FC<{
                     </Splitter>
                   </Splitter.Panel>
                 </Splitter>
+              )
             }
           </Card>
         </Layout.Content>

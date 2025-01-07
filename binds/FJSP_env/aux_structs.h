@@ -19,9 +19,6 @@ enum class OperationStatus
     unscheduled,
     waiting,
     processing,
-    // need_transport,
-    // waiting_transport,
-    // transporting,
     finished
 };
 

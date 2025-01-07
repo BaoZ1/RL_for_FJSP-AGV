@@ -1,16 +1,26 @@
 /** @jsxImportSource @emotion/react */
 
 import { FC, useEffect, useState, MouseEvent, WheelEvent, useRef } from "react"
-import { Button, Card, Flex, FloatButton, Layout, Splitter } from "antd"
-import { AGVState, EnvState, MachineState, OperationState } from "./types"
+import { Button, Card, Flex, FloatButton, Layout, Splitter, Typography, Dropdown, InputNumber, Modal, Timeline, Empty } from "antd"
+import { operationStatusMapper, OperationStatus, OperationStatusIdx, Action, AGVState, EnvState, MachineState, OperationState, actionStatusMapper, ActionStatusIdx } from "./types"
 import { css } from "@emotion/react"
 import { offset, useClientPoint, useFloating, useHover, useInteractions } from "@floating-ui/react"
-import { AimOutlined, CaretRightFilled } from '@ant-design/icons'
+import { AimOutlined, CaretRightFilled, CloseOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import { initEnv, loadModel, modelList, predict, removeModel } from "./backend-api"
+import { open } from "@tauri-apps/plugin-dialog"
+import { JSX } from "@emotion/react/jsx-runtime"
 
+const operationColor = {
+  blocked: "#5b5b5b",
+  unscheduled: "#db9200",
+  waiting: "#b4a204",
+  processing: "#007cdb",
+  finished: "#5dd402"
+} as const satisfies Record<OperationStatus, string>
 
 const OperationNode: FC<{
   className?: string,
-  operation: { id: number, x: number, y: number },
+  operation: { id: number, statusIdx: OperationStatusIdx, x: number, y: number },
   radius: number,
   scaleRate: number
 }> = (props) => {
@@ -28,14 +38,11 @@ const OperationNode: FC<{
         position: absolute;
         left: ${props.operation.x}px;
         top: ${props.operation.y}px;
-        background-color: wheat;
+        background-color: ${operationColor[operationStatusMapper[props.operation.statusIdx]]};
         display: flex;
         justify-content: center;
         align-items: center;
         z-index: 1;
-        :hover {
-          border-color: red;
-        }
       `}
     >
       {props.operation.id}
@@ -134,7 +141,7 @@ const OperationViewer: FC<{
   states: OperationState[],
   AGVs: AGVState[],
 }> = (props) => {
-  const [operationPosList, setOperationPosList] = useState<{ id: number, x: number, y: number }[]>([])
+  const [operationInfoList, setOperationInfoList] = useState<{ id: number, statusIdx: OperationStatusIdx, x: number, y: number }[]>([])
 
   const colSpace = 150
   const rowSpace = 125
@@ -175,19 +182,20 @@ const OperationViewer: FC<{
       }
       layers.push(new_layer)
     }
-    const pos_list: { id: number, x: number, y: number }[] = []
+    const info_list: { id: number, statusIdx: OperationStatusIdx, x: number, y: number }[] = []
     for (const [col_idx, col] of layers.entries()) {
       for (const [idx, id] of col.entries()) {
-        pos_list.push({
+        info_list.push({
           id,
+          statusIdx: props.states.find((item) => item.id === id)!.status as OperationStatusIdx,
           x: (col_idx - layers.length / 2 + 0.5) * colSpace,
           y: (idx - col.length / 2 + 0.5) * rowSpace
         })
       }
     }
-    setOperationPosList(pos_list)
+    setOperationInfoList(info_list)
   }
-  useEffect(fix_sort, [])
+  useEffect(fix_sort, [props.states])
 
   const [graphOffset, setGraphOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
   const [scaleRatio, setScaleRatio] = useState<number>(1)
@@ -231,7 +239,6 @@ const OperationViewer: FC<{
       <div css={css`
         width: 0;
         height: 0;
-        /* border: 5px solid red; */
         position: absolute;
         overflow: visible;
         top: calc(50% + ${graphOffset.y}px);
@@ -239,16 +246,16 @@ const OperationViewer: FC<{
         scale: ${scaleRatio};
       `}>
         {
-          operationPosList.map((s) => (
+          operationInfoList.map((s) => (
             props.states.find((item) => item.id === s.id)!.predecessors.map((pred_id) => (
-              operationPosList.find((item) => item.id === pred_id)!
+              operationInfoList.find((item) => item.id === pred_id)!
             )).map((p) => (
               <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRate={scaleRatio} />
             ))
           ))
         }
         {
-          operationPosList.map((operation) => (
+          operationInfoList.map((operation) => (
             <OperationNode key={operation.id} operation={operation}
               radius={nodeRadius} scaleRate={scaleRatio}
             />
@@ -392,30 +399,226 @@ const MachineViewer: FC<{
 }
 
 const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void }> = (props) => {
+  const [modelPaths, setModelPaths] = useState<string[]>([])
+  const [selectedModelPath, setSelectedModelPath] = useState<string | null>(null)
+  const [sampleCount, setSampleCount] = useState<number>(4)
+  const [simCount, setSimCount] = useState<number>(20)
+
+  const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
+  const [viewIdx, setViewIdx] = useState<number | null>(null)
+
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false)
+  const [abortController, setAbortController] = useState<AbortController | null>(null)
+  const [progress, setProgress] = useState<[number, number, number]>([0, 0, 0])
+
+  const [timelineItems, setTimelineItems] = useState<{
+    label: string | undefined,
+    color: string | undefined,
+    children: JSX.Element
+  }[]>([])
+  const timelineItemRefs = useRef<HTMLAnchorElement[]>([])
+
+  useEffect(() => {
+    (async () => setModelPaths((await modelList())))()
+  }, [])
+
+  const loadNewModel = async () => {
+    const path = await open()
+    if (path !== null) {
+      if (modelPaths.find((p) => p === path) === undefined) {
+        await loadModel(path)
+        setModelPaths((prevs) => [...prevs, path])
+        setSelectedModelPath(path)
+      }
+    }
+  }
+
+  const removeLoadedModel = async (path: string) => {
+    await removeModel(path)
+    setModelPaths((prevs) => prevs.filter((p) => p !== path))
+    if (selectedModelPath === path) {
+      setSelectedModelPath(null)
+    }
+  }
+
+  const initProgress = async () => {
+    setRecords([{ time: 0, info: "init", state: await initEnv(props.state) }])
+    setViewIdx(null)
+    setProgress([0, 0, 0])
+  }
+
+  const changeViewIdx = ({ idx, delta }: { idx?: number, delta?: number }) => {
+    if (idx === undefined && delta === undefined) {
+      setViewIdx(null)
+      return
+    }
+
+    if (idx !== undefined) {
+      setViewIdx(idx)
+    }
+    else if (delta !== undefined) {
+      idx = viewIdx! + delta
+      setViewIdx(idx)
+    }
+    timelineItemRefs.current[idx!]?.scrollIntoView({ behavior: "smooth", block: "center" })
+  }
+
+  const startPredict = async () => {
+    await initProgress()
+    const ac = new AbortController()
+    setAbortController(ac)
+    setIsModalOpen(true)
+    try {
+      await predict(
+        props.state,
+        selectedModelPath!,
+        sampleCount,
+        simCount,
+        (progress) => {
+          setRecords((prevs) => {
+            console.log(ac.signal.aborted)
+            if (!ac.signal.aborted) {
+              return [
+                ...prevs,
+                {
+                  time: progress.graph_state.timestamp,
+                  info: progress.action,
+                  state: progress.graph_state
+                }
+              ]
+            }
+            else {
+              return [...prevs]
+            }
+          })
+          setProgress([progress.round_count, progress.total_step, progress.finished_step])
+        },
+        ac.signal
+      )
+      await new Promise((resolve)=>setTimeout(resolve, 200))
+      setRecords((prevs) => {
+        const lastState = prevs[prevs.length - 1].state
+        return [
+          ...prevs,
+          {
+            time: lastState.timestamp,
+            info: "finished",
+            state: lastState
+          }
+        ]
+      })
+    } catch (error) {
+      setRecords((prevs) => {
+        const lastState = prevs[prevs.length - 1].state
+        return [
+          ...prevs,
+          {
+            time: lastState.timestamp,
+            info: "interrupted",
+            state: lastState
+          }
+        ]
+      })
+    }
+
+    setAbortController(null)
+    setIsModalOpen(false)
+  }
+
+  useEffect(() => {
+    if (records.length === 0) {
+      changeViewIdx({})
+    }
+    else {
+      changeViewIdx({ idx: records.length - 1 })
+      requestAnimationFrame(() => {
+        timelineItemRefs.current[timelineItemRefs.current.length - 1]?.scrollIntoView({ behavior: "smooth", block: "center" })
+      })
+    }
+  }, [records])
+
+  useEffect(() => {
+    let prevTime: number | null = null
+    let items: { label: string | undefined; color: string | undefined; children: JSX.Element }[] = []
+    timelineItemRefs.current = []
+    records.forEach((item, idx) => {
+      items.push({
+        label: prevTime === item.time ? undefined : item.time.toFixed(2),
+        color: idx === viewIdx ? "red" : prevTime === item.time ? "gray" : undefined,
+        children: (
+          <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
+            font-weight: ${idx === viewIdx ? "bold" : "normal"};
+          `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+          >
+            {
+              typeof item.info === "string" ? item.info : (
+                actionStatusMapper[item.info.action_type as ActionStatusIdx]
+              )
+            }
+          </a>
+        )
+      })
+      prevTime = item.time
+    })
+    setTimelineItems(items)
+  }, [records, viewIdx])
 
   return (
-    <Layout className={props.className}>
-      <Layout.Header css={css`
+    <>
+      <Layout className={props.className}>
+        <Layout.Header css={css`
         padding: 0;
         background-color: transparent;
         line-height: unset;
         height: unset;
       `}>
-        <Card css={css`
+          <Card css={css`
           .ant-card-body {
             height: 100%;
             padding: 10px;
           }
         `}>
-          <Flex justify="flex-start" align="center" gap="small">
-            <Button type="primary" onClick={props.onReture}>返回</Button>
-          </Flex>
-        </Card>
-      </Layout.Header>
-      <Layout.Content css={css`
+            <Flex justify="flex-start" align="center" gap="small">
+              模型：
+              <Dropdown trigger={["click"]} menu={{
+                items: [
+                  ...modelPaths.map((path) => ({
+                    label: (
+                      <p onClick={() => setSelectedModelPath(path)}>
+                        <Typography.Text>
+                          {path}
+                        </Typography.Text>
+                        <Button
+                          onClick={(e) => { e.preventDefault(); removeLoadedModel(path) }}
+                          icon={<CloseOutlined />}
+                        />
+                      </p>
+                    ),
+                    key: path
+                  })),
+                  { type: "divider" },
+                  { key: "new", label: <p onClick={loadNewModel}>加载模型</p> }
+                ]
+              }}>
+                <a onClick={(e) => e.preventDefault()}>
+                  {selectedModelPath?.split("\\").reverse()[0] || "未选择"}
+                </a>
+              </Dropdown>
+              采样数量：
+              <InputNumber min={1} value={sampleCount} onChange={(v) => setSampleCount(v || 1)} />
+              模拟步数：
+              <InputNumber min={0} value={simCount} onChange={(v) => setSimCount(v || 0)} />
+              <Button type="primary" onClick={startPredict} disabled={selectedModelPath === null}>规划全部</Button>
+              <Button css={css`
+              margin-left: 10px;
+            `} type="default" onClick={props.onReture}>返回</Button>
+            </Flex>
+          </Card>
+        </Layout.Header>
+        <Layout.Content css={css`
         margin-top: 5px;
       `}>
-        <Card css={css`
+          <Card css={css`
           height: 100%;
 
           .ant-card-body {
@@ -423,27 +626,79 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
             padding: 0;
           }
         `}>
-          <Splitter>
-            <Splitter.Panel defaultSize="70%">
-              <OperationViewer states={props.state.operations} AGVs={props.state.AGVs}
-                css={css`
-                  width: 100%;
-                  height: 100%;
-                `}
-              />
-            </Splitter.Panel>
-            <Splitter.Panel min="20%" collapsible>
-              <MachineViewer states={props.state.machines} paths={props.state.direct_paths}
-                  AGVs={props.state.AGVs} css={css`
-                    width: 100%;
-                    height: 100%;
-                  `}
-              />
-            </Splitter.Panel>
-          </Splitter>
-        </Card>
-      </Layout.Content>
-    </Layout>
+            <Splitter>
+              <Splitter.Panel defaultSize="80%">
+                <Splitter layout="vertical">
+                  <Splitter.Panel defaultSize="70%">
+                    <div css={css`
+                      position: relative;
+                      width: 100%;
+                      height: 100%;
+                    `}>
+                      <OperationViewer states={(viewIdx !== null ? records[viewIdx].state : props.state).operations}
+                        AGVs={(viewIdx !== null ? records[viewIdx].state : props.state).AGVs}
+                        css={css`
+                          width: 100%;
+                          height: 100%;
+                        `}
+                      />
+                      <Flex justify="center" gap={10} css={css`
+                        position: absolute;
+                        bottom: 10px;
+                        width: 100%;
+                      `}>
+                        <Button shape="circle"
+                          onClick={() => changeViewIdx({ delta: -1 })}
+                          disabled={records.length === 0 || viewIdx === 0 || viewIdx === null}
+                          icon={<LeftOutlined />}
+                        />
+                        <Button shape="circle"
+                          onClick={() => changeViewIdx({ delta: 1 })}
+                          disabled={records.length === 0 || viewIdx === records.length - 1 || viewIdx === null}
+                          icon={<RightOutlined />}
+                        />
+                      </Flex>
+                    </div>
+                  </Splitter.Panel>
+                  <Splitter.Panel min="20%">
+                    <MachineViewer states={(viewIdx !== null ? records[viewIdx].state : props.state).machines}
+                      paths={(viewIdx !== null ? records[viewIdx].state : props.state).direct_paths}
+                      AGVs={(viewIdx !== null ? records[viewIdx].state : props.state).AGVs}
+                      css={css`
+                        width: 100%;
+                        height: 100%;
+                      `}
+                    />
+                  </Splitter.Panel>
+                </Splitter>
+              </Splitter.Panel>
+              <Splitter.Panel collapsible>
+                {
+                  viewIdx !== null ? (
+                    <Timeline mode="left" items={timelineItems} css={css`
+                      margin: 15px;
+                    `} />
+                  ) : (
+                    <Flex justify="center" align="center" css={css`
+                      height: 100%;
+                    `}>
+                      <Empty />
+                    </Flex>
+                  )
+                }
+              </Splitter.Panel>
+            </Splitter>
+          </Card>
+        </Layout.Content>
+      </Layout>
+      <Modal open={isModalOpen} onCancel={() => abortController!.abort()} closable={false}
+        footer={(_, { CancelBtn }) => (
+          <CancelBtn />
+        )}
+      >
+        {progress}
+      </Modal>
+    </>
   )
 }
 

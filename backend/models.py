@@ -134,9 +134,12 @@ class ActionState(BaseModel):
             case "python":
                 return v
 
-class PredictResult(BaseModel):
-    graph_states: list[EnvState]
-    actions: list[ActionState]
+class PredictProgress(BaseModel):
+    round_count: int
+    finished_step: int
+    total_step: int
+    graph_state: EnvState
+    action: ActionState
 
 if __name__ == "__main__":
     with open(r"private\test_1.json", "r") as f:

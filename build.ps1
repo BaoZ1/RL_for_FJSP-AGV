@@ -10,7 +10,11 @@ param (
 
     [Parameter()]
     [switch]
-    $install = $false
+    $install = $false,
+
+    [Parameter()]
+    [switch]
+    $updateBackend = $false
 )
 
 $root = Split-Path -Parent $PSCommandPath
@@ -62,18 +66,20 @@ function BuildBind {
 }
 
 function BuildFrontend {
-    Set-Location "$($root)/backend"
+    if ($updateBackend) {
+        Set-Location "$($root)/backend"
 
-    pyinstaller main.py --noconfirm
+        pyinstaller main.py --noconfirm
 
-    Set-Location $root
+        Set-Location $root
 
-    $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
+        $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
 
-    Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
+        Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
 
-    Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
-    Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force
+        Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
+        Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force
+    }
 
     Set-Location "$($root)/frontend"
 

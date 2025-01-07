@@ -12,12 +12,13 @@
     "shell:allow-spawn",
     "dialog:default",
     {
-        "identifier": "http:default",
-        "allow": [
-            {
-                "url": "http://localhost:8000"
-            }
-        ]
-    }
+      "identifier": "http:default",
+      "allow": [
+        {
+          "url": "http://localhost:8000"
+        }
+      ]
+    },
+    "websocket:default"
   ]
 }

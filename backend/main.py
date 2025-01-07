@@ -137,20 +137,15 @@ async def predict(
     model_path: Annotated[str, Query()],
     sample_count: Annotated[int, Query()],
     sim_count: Annotated[int, Query()],
-    predict_num: Annotated[int, Query()],
 ):
     await websocket.accept()
     try:
-        async for finished, info in models[model_path].predict(
+        async for data in models[model_path].predict(
             use_graph(EnvState.model_validate(await websocket.receive_json())),
             sample_count,
             sim_count,
-            predict_num,
         ):
-            if not finished:
-                await websocket.send_json(info)
-            else:
-                await websocket.send_text(PredictResult.model_validate(info).model_dump_json())
+            await websocket.send_text(PredictProgress.model_validate(data).model_dump_json())
 
     except WebSocketDisconnect:
         pass

@@ -1,7 +1,10 @@
-import { AddOperationParams, EnvState, GenerationParams } from "./types"
+import { AddOperationParams, EnvState, GenerationParams, PredictProgress } from "./types"
 import { fetch } from "@tauri-apps/plugin-http"
+import WebSocket from '@tauri-apps/plugin-websocket';
 
-const BASE_PATH = "http://localhost:8000"
+const PORT = 8000
+
+const BASE_PATH = `http://localhost:${PORT}`
 
 export const newEnv = async () => {
   const url = new URL("env", BASE_PATH)
@@ -32,9 +35,25 @@ export const randEnv = async (params: GenerationParams) => {
   return await response.json() as EnvState
 }
 
+export const initEnv = async (state: EnvState) => {
+  const url = new URL("env/init", BASE_PATH)
+  const response = await fetch(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    }
+  )
+  if (!response.ok) {
+    console.log(await response.json())
+  }
+  return await response.json() as EnvState
+}
+
 export const addOperation = async (state: EnvState, params: AddOperationParams) => {
   console.log(params);
-  
+
   const url = new URL("operation/add", BASE_PATH)
   url.searchParams.append("type", params.machine_type.toString())
   url.searchParams.append("time", params.process_time.toString())
@@ -104,4 +123,65 @@ export const removePath = async (state: EnvState, a: number, b: number) => {
     console.log(await response.json())
   }
   return await response.json() as EnvState
+}
+
+export const modelList = async () => {
+  const url = new URL("model/list", BASE_PATH)
+  const response = await fetch(url)
+  if (!response.ok) {
+    console.log(await response.json())
+  }
+  return await response.json() as string[]
+}
+
+export const loadModel = async (model_path: string) => {
+  const url = new URL("model/load", BASE_PATH)
+  url.searchParams.append("model_path", model_path)
+  const response = await fetch(url)
+  if (!response.ok) {
+    console.log(await response.json())
+  }
+}
+
+export const removeModel = async (model_path: string) => {
+  const url = new URL("model/remove", BASE_PATH)
+  url.searchParams.append("model_path", model_path)
+  const response = await fetch(url)
+  if (!response.ok) {
+    console.log(await response.json())
+  }
+}
+
+export const predict = async (
+  state: EnvState,
+  model_path: string,
+  sample_count: number,
+  sim_count: number,
+  cb: (progress: PredictProgress) => void,
+  signal: AbortSignal
+) => {
+  const search_params = new URLSearchParams()
+  search_params.append("model_path", model_path)
+  search_params.append("sample_count", sample_count.toString())
+  search_params.append("sim_count", sim_count.toString())
+
+  const ws = await WebSocket.connect(`ws://localhost:${PORT}/test/predict?${search_params.toString()}`)
+
+  await ws.send(JSON.stringify(state))
+
+  await new Promise<void>((resolve, reject) => {
+    signal.addEventListener("abort", () => {
+      ws.disconnect().then(reject)
+    })
+
+    ws.addListener((msg) => {
+      if (typeof msg.data === "string") {
+        const data = JSON.parse(msg.data!.toString()) as PredictProgress
+        cb(data)
+        if (data.finished_step == data.total_step) {
+          ws.disconnect().then(resolve)
+        }
+      }
+    })
+  })
 }

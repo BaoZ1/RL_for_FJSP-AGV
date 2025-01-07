@@ -29,6 +29,7 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 import asyncio
 
+
 class ResidualLinear(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -1448,18 +1449,11 @@ class Agent(L.LightningModule):
         graph: Graph,
         sample_count: int,
         sim_count: int,
-        predict_num: int,
     ):
-        assert predict_num >= 1
-        env = Environment.from_graphs([graph for _ in range(predict_num)])
-        results: list[tuple[list[Graph], list[Action]]] = [
-            ([g], []) for g in env.envs
-        ]
-        finished = [False] * len(env.envs)
+        env = Environment.from_graphs([graph])
+
         for round_count in count(1):
             obs = env.observe()
-            if len(obs) == 0:
-                break
 
             actions, _ = self.single_step_predict(
                 obs,
@@ -1468,43 +1462,20 @@ class Agent(L.LightningModule):
             )
             _, dones, _ = env.step(actions)
 
-            list_idx = 0
-            for i, (env_finished, next_graph) in enumerate(zip(finished, env.envs)):
-                if env_finished:
-                    continue
-                results[i][0].append(next_graph)
-                results[i][1].append(actions[list_idx])
-                if dones[list_idx]:
-                    finished[i] = True
-                list_idx += 1
+            finished_step, total_step = env.envs[0].progress()
 
-            total_step = 0
-            finished_step = 0
-            for e in env.envs:
-                f, t = e.progress()
-                total_step += t
-                finished_step += f
-            total_step /= predict_num
-            finished_step /= predict_num
+            yield {
+                "round_count": round_count,
+                "finished_step": finished_step,
+                "total_step": total_step,
+                "graph_state": env.envs[0],
+                "action": actions[0],
+            }
+            
+            if env.envs[0].finished():
+                break
 
-            yield (
-                False,
-                {
-                    "round_count": round_count,
-                    "finished_step": finished_step,
-                    "total_step": total_step,
-                },
-            )
             await asyncio.sleep(0)
-
-        result = results[np.argmin([graph.get_timestamp() for graph in env.envs])]
-        yield (
-            True,
-            {
-                "graph_states": result[0],
-                "actions": result[1],
-            },
-        )
 
     def validation_step(self, batch: list[Graph]):
         env = Environment.from_graphs(
