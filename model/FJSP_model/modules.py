@@ -1460,7 +1460,11 @@ class Agent(L.LightningModule):
                 sample_count,
                 sim_count,
             )
-            _, dones, _ = env.step(actions)
+            (
+                _,
+                dones,
+                _,
+            ) = env.step(actions, False)
 
             finished_step, total_step = env.envs[0].progress()
 
@@ -1471,7 +1475,7 @@ class Agent(L.LightningModule):
                 "graph_state": env.envs[0],
                 "action": actions[0],
             }
-            
+
             if env.envs[0].finished():
                 break
 
