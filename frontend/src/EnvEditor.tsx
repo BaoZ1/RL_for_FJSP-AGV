@@ -1,6 +1,6 @@
 /** @jsxImportSource @emotion/react */
 
-import { FC, useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
+import { useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
 import {
   Splitter, Button, Layout, Card, Empty, Flex, Modal,
   Form, InputNumber, Space, FormInstance, FloatButton, Select,
@@ -15,11 +15,10 @@ import {
   RedoOutlined, CaretRightFilled, AimOutlined,
   PlusCircleOutlined, CloseCircleOutlined, PlusOutlined
 } from '@ant-design/icons';
-import { OperationState, EnvState, GenerationParams, AGVState, MachineState, AddOperationParams } from "./types";
+import { BaseFC, OperationState, EnvState, GenerationParams, AGVState, MachineState, AddOperationParams } from "./types";
 import { addOperation, addPath, loadEnv, newEnv, randEnv, removeOperation } from "./backend-api";
 
-const OperationNode: FC<{
-  className?: string,
+const OperationNode: BaseFC<{
   operation: { id: number, x: number, y: number },
   selected: boolean,
   onClick: () => void,
@@ -208,8 +207,7 @@ const OperationNode: FC<{
   )
 }
 
-const OperationLine: FC<{
-  className?: string,
+const OperationLine: BaseFC<{
   p: { id: number, x: number, y: number },
   s: { id: number, x: number, y: number },
   nodeRadius: number,
@@ -294,8 +292,7 @@ const OperationLine: FC<{
   )
 }
 
-const OperationEditor: FC<{
-  className?: string,
+const OperationEditor: BaseFC<{
   states: OperationState[],
   selectedOperation: number | null,
   onBackgroundClick: () => void,
@@ -447,8 +444,7 @@ const OperationEditor: FC<{
   )
 }
 
-const MachineNode: FC<{
-  className?: string,
+const MachineNode: BaseFC<{
   state: MachineState,
   selected: boolean,
   onClick: () => void,
@@ -503,9 +499,7 @@ const MachineNode: FC<{
   )
 }
 
-const MachinePath: FC<{
-  className?: string
-}> = (props) => {
+const MachinePath: BaseFC = (props) => {
 
   return (
     <div className={props.className} css={css`
@@ -515,8 +509,7 @@ const MachinePath: FC<{
   )
 }
 
-const MachineEditor: FC<{
-  className?: string,
+const MachineEditor: BaseFC<{
   states: MachineState[],
   paths: [number, number][],
   selected: number | null,
@@ -620,7 +613,7 @@ const MachineEditor: FC<{
   )
 }
 
-const AGVNode: FC<{ state: AGVState }> = (props) => {
+const AGVNode: BaseFC<{ state: AGVState }> = (props) => {
   const [reference, setReference] = useState<HTMLElement | null>(null)
   const arrowRef = useRef(null)
 
@@ -649,7 +642,7 @@ const AGVNode: FC<{ state: AGVState }> = (props) => {
 
   return (
     <>
-      <div ref={setReference} {...getReferenceProps()} css={css`
+      <div className={props.className} ref={setReference} {...getReferenceProps()} css={css`
         width: 50px;
         height: 50px;
         background-color: black;
@@ -712,7 +705,7 @@ const AGVNode: FC<{ state: AGVState }> = (props) => {
   )
 }
 
-const AddOperationConfigForm: FC<{
+const AddOperationConfigForm: BaseFC<{
   formData: FormInstance<AddOperationParams>,
   onFinish: () => void,
   machines?: MachineState[]
@@ -731,7 +724,7 @@ const AddOperationConfigForm: FC<{
   })
 
   return (
-    <Form form={props.formData} onFinish={props.onFinish}>
+    <Form className={props.className} form={props.formData} onFinish={props.onFinish}>
       <Flex justify="center" align="center" css={css`
           margin-bottom: 20px;
         `}
@@ -793,24 +786,24 @@ const AddOperationConfigForm: FC<{
   )
 }
 
-const OperationInfoForm: FC<{
+const OperationInfoForm: BaseFC<{
   formData: FormInstance<OperationState>,
   onFinish: () => void
 }> = (props) => {
   return (
-    <Form form={props.formData} onFinish={props.onFinish}>
+    <Form className={props.className} form={props.formData} onFinish={props.onFinish}>
       <div>{props.formData.getFieldValue("id")}</div>
     </Form>
   )
 }
 
-const RandParamConfigForm: FC<{
+const RandParamConfigForm: BaseFC<{
   formData: FormInstance<GenerationParams>,
   onFinish: (values: GenerationParams) => void
 }> = (props) => {
 
   return (
-    <Form form={props.formData} initialValues={{
+    <Form className={props.className} form={props.formData} initialValues={{
       operation_count: 10,
       machine_count: 5,
       AGV_count: 5,
@@ -870,12 +863,11 @@ const RandParamConfigForm: FC<{
   )
 }
 
-const EnvEditor: FC<{
-  className?: string,
+const EnvEditor: BaseFC<{
   state: EnvState | null,
   setState: React.Dispatch<React.SetStateAction<EnvState | null>>,
   onStart: () => void,
-}> = ({ className, state, setState, onStart }) => {
+}> = (props) => {
 
   const [isRandModalOpen, setIsRandModalOpen] = useState(false)
   const [randParamsForm] = Form.useForm<GenerationParams>()
@@ -887,7 +879,7 @@ const EnvEditor: FC<{
     setIsAddOperationModalOpen(true)
   }
   const handelRemoveOperation = async (id: number) => {
-    setState(await removeOperation(state!, id))
+    props.setState(await removeOperation(props.state!, id))
   }
 
   const [selectedOperation, setSelectedOperation] = useState<number | null>(null)
@@ -916,13 +908,13 @@ const EnvEditor: FC<{
 
     }
     else {
-      setState(await addPath(state!, selectedMachine, id))
+      props.setState(await addPath(props.state!, selectedMachine, id))
       setSelectedMachine(null)
     }
   }
   const updateMachinePos = (id: number, dx: number, dy: number) => {
     setSelectedMachine(null)
-    setState((env) => {
+    props.setState((env) => {
       const ret = structuredClone(env!)
       const target = ret.machines.find((item) => item.id === id)!
       target.pos = { x: target.pos.x + dx, y: target.pos.y - dy }
@@ -932,7 +924,7 @@ const EnvEditor: FC<{
 
   return (
     <>
-      <Layout className={className}>
+      <Layout className={props.className}>
         <Layout.Header css={css`
           padding: 0;
           background-color: transparent;
@@ -949,19 +941,19 @@ const EnvEditor: FC<{
               <Button type="primary" onClick={async () => {
                 const path = await open()
                 if (path !== null) {
-                  setState(await loadEnv(path))
+                  props.setState(await loadEnv(path))
                 }
               }}>
                 读取
               </Button>
-              <Button type="primary" onClick={async () => setState(await newEnv())}>新建</Button>
+              <Button type="primary" onClick={async () => props.setState(await newEnv())}>新建</Button>
               <Space.Compact>
                 <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
                 <Button type="primary" icon={<RedoOutlined />}
-                  onClick={async () => { setState(await randEnv(randParamsForm.getFieldsValue())) }}
+                  onClick={async () => { props.setState(await randEnv(randParamsForm.getFieldsValue())) }}
                 />
               </Space.Compact>
-              <Button type="primary" disabled={state === null} onClick={onStart} css={css`
+              <Button type="primary" disabled={props.state === null} onClick={props.onStart} css={css`
                 margin-left: 10px;
                 &:not([disabled]) {
                   > span {
@@ -998,19 +990,19 @@ const EnvEditor: FC<{
             }
           `}>
             {
-              state === null ? (
+              props.state === null ? (
                 <Flex justify="center" align="center" css={css`
                     height: 100%;
                   `}
                 >
                   <Empty>
-                    <Button type="primary" onClick={async () => setState(await newEnv())}>新建</Button>
+                    <Button type="primary" onClick={async () => props.setState(await newEnv())}>新建</Button>
                   </Empty>
                 </Flex>
               ) : (
                 <Splitter>
                   <Splitter.Panel defaultSize="70%">
-                    <OperationEditor states={state.operations} selectedOperation={selectedOperation}
+                    <OperationEditor states={props.state.operations} selectedOperation={selectedOperation}
                       onBackgroundClick={() => setSelectedOperation(null)}
                       onOperationClick={handelOperationClick}
                       onAddOperation={handelAddOperation}
@@ -1024,7 +1016,7 @@ const EnvEditor: FC<{
                   <Splitter.Panel min="20%" collapsible>
                     <Splitter layout="vertical">
                       <Splitter.Panel defaultSize="70%">
-                        <MachineEditor states={state.machines} paths={state.direct_paths}
+                        <MachineEditor states={props.state.machines} paths={props.state.direct_paths}
                           selected={selectedMachine}
                           onBackgroundClicked={() => setSelectedMachine(null)}
                           onMachineClicked={handelMachineClick}
@@ -1039,7 +1031,7 @@ const EnvEditor: FC<{
                           padding: 15px;
                         `}>
                           {
-                            state.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
+                            props.state.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
                           }
                           <div css={css`
                             width: 50px;
@@ -1077,10 +1069,10 @@ const EnvEditor: FC<{
       <Modal title="添加工序" open={isAddOperationModalOpen} footer={null}
         onCancel={() => setIsAddOperationModalOpen(false)}
       >
-        <AddOperationConfigForm formData={addOperationParamsForm} machines={state?.machines}
+        <AddOperationConfigForm formData={addOperationParamsForm} machines={props.state?.machines}
           onFinish={async () => {
             setIsAddOperationModalOpen(false)
-            setState(await addOperation(state!, addOperationParamsForm.getFieldsValue(true)))
+            props.setState(await addOperation(props.state!, addOperationParamsForm.getFieldsValue(true)))
           }}
         />
       </Modal>
@@ -1097,7 +1089,7 @@ const EnvEditor: FC<{
         <RandParamConfigForm formData={randParamsForm}
           onFinish={async (values) => {
             setIsRandModalOpen(false)
-            setState(await randEnv(values))
+            props.setState(await randEnv(values))
           }}
         />
       </Modal>

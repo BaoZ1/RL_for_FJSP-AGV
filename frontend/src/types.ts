@@ -1,3 +1,7 @@
+import { FC } from "react"
+
+export type BaseFC<ExtraProps extends Record<string, any> = {}> = FC<{className?: string} & ExtraProps>
+
 export const operationStatusMapper = {
   0: "blocked",
   1: "unscheduled",
@@ -68,7 +72,7 @@ export type ActionStatusIdx = keyof typeof actionStatusMapper
 export type ActionStatus = (typeof actionStatusMapper)[ActionStatusIdx]
 
 export type Action = {
-  action_type: number
+  action_type: ActionStatusIdx
   AGV_id: number | null
   target_machine: number | null
   target_product: { from: number, to: number } | null

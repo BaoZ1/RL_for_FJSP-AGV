@@ -131,11 +131,11 @@ class Environment:
             elif action.action_type == ActionType.move:
                 reward += -0.5
             new_env = env.act(action)
-            if (
-                len(new_actions := new_env.get_available_actions()) == 1
-                and new_actions[0].action_type == ActionType.wait
-            ):
-                new_env = new_env.act(new_actions[0])
+            # if (
+            #     len(new_actions := new_env.get_available_actions()) == 1
+            #     and new_actions[0].action_type == ActionType.wait
+            # ):
+            #     new_env = new_env.act(new_actions[0])
             action_idx += 1
             new_lb = new_env.finish_time_lower_bound()
             d_lb = new_lb - prev_lb

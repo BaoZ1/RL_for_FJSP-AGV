@@ -33,7 +33,7 @@ models: dict[str, Agent] = {}
 
 
 def use_graph(state: Annotated[EnvState, Body()]) -> Graph:
-    return Graph.from_state(state.model_dump())
+    return Graph.from_state(state.model_dump(by_alias=True))
 
 
 @app.get("/env")
@@ -145,7 +145,7 @@ async def predict(
             sample_count,
             sim_count,
         ):
-            await websocket.send_text(PredictProgress.model_validate(data).model_dump_json())
+            await websocket.send_text(PredictProgress.model_validate(data).model_dump_json(by_alias=True))
 
     except WebSocketDisconnect:
         pass

@@ -1,11 +1,17 @@
 /** @jsxImportSource @emotion/react */
 
-import { FC, useEffect, useState, MouseEvent, WheelEvent, useRef } from "react"
-import { Button, Card, Flex, FloatButton, Layout, Splitter, Typography, Dropdown, InputNumber, Modal, Timeline, Empty } from "antd"
-import { operationStatusMapper, OperationStatus, OperationStatusIdx, Action, AGVState, EnvState, MachineState, OperationState, actionStatusMapper, ActionStatusIdx } from "./types"
+import { useEffect, useState, MouseEvent, WheelEvent, useRef, useLayoutEffect } from "react"
+import {
+  Button, Card, Flex, FloatButton, Layout, Splitter,
+  Typography, Dropdown, InputNumber, Modal, Timeline, TimelineItemProps, Empty,
+} from "antd"
+import {
+  BaseFC, operationStatusMapper, OperationStatus, OperationStatusIdx, Action,
+  AGVState, EnvState, MachineState, OperationState, actionStatusMapper
+} from "./types"
 import { css } from "@emotion/react"
 import { offset, useClientPoint, useFloating, useHover, useInteractions } from "@floating-ui/react"
-import { AimOutlined, CaretRightFilled, CloseOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import { AimOutlined, CaretRightFilled, ClockCircleOutlined, CloseOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
 import { initEnv, loadModel, modelList, predict, removeModel } from "./backend-api"
 import { open } from "@tauri-apps/plugin-dialog"
 import { JSX } from "@emotion/react/jsx-runtime"
@@ -18,8 +24,7 @@ const operationColor = {
   finished: "#5dd402"
 } as const satisfies Record<OperationStatus, string>
 
-const OperationNode: FC<{
-  className?: string,
+const OperationNode: BaseFC<{
   operation: { id: number, statusIdx: OperationStatusIdx, x: number, y: number },
   radius: number,
   scaleRate: number
@@ -50,8 +55,7 @@ const OperationNode: FC<{
   )
 }
 
-const OperationLine: FC<{
-  className?: string,
+const OperationLine: BaseFC<{
   p: { id: number, x: number, y: number },
   s: { id: number, x: number, y: number },
   nodeRadius: number,
@@ -136,8 +140,7 @@ const OperationLine: FC<{
   )
 }
 
-const OperationViewer: FC<{
-  className?: string,
+const OperationViewer: BaseFC<{
   states: OperationState[],
   AGVs: AGVState[],
 }> = (props) => {
@@ -272,10 +275,7 @@ const OperationViewer: FC<{
 }
 
 
-const MachineNode: FC<{
-  className?: string,
-  state: MachineState,
-}> = (props) => {
+const MachineNode: BaseFC<{ state: MachineState }> = (props) => {
 
   return (
     <div className={props.className}
@@ -295,9 +295,7 @@ const MachineNode: FC<{
   )
 }
 
-const MachinePath: FC<{
-  className?: string
-}> = (props) => {
+const MachinePath: BaseFC = (props) => {
 
   return (
     <div className={props.className} css={css`
@@ -307,8 +305,7 @@ const MachinePath: FC<{
   )
 }
 
-const MachineViewer: FC<{
-  className?: string,
+const MachineViewer: BaseFC<{
   states: MachineState[],
   paths: [number, number][],
   AGVs: AGVState[],
@@ -398,7 +395,7 @@ const MachineViewer: FC<{
   )
 }
 
-const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void }> = (props) => {
+const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => {
   const [modelPaths, setModelPaths] = useState<string[]>([])
   const [selectedModelPath, setSelectedModelPath] = useState<string | null>(null)
   const [sampleCount, setSampleCount] = useState<number>(4)
@@ -411,11 +408,7 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
   const [abortController, setAbortController] = useState<AbortController | null>(null)
   const [progress, setProgress] = useState<[number, number, number]>([0, 0, 0])
 
-  const [timelineItems, setTimelineItems] = useState<{
-    label: string | undefined,
-    color: string | undefined,
-    children: JSX.Element
-  }[]>([])
+  const [timelineItems, setTimelineItems] = useState<TimelineItemProps[]>([])
   const timelineItemRefs = useRef<HTMLAnchorElement[]>([])
 
   useEffect(() => {
@@ -447,21 +440,6 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
     setProgress([0, 0, 0])
   }
 
-  const changeViewIdx = ({ idx, delta }: { idx?: number, delta?: number }) => {
-    if (idx === undefined && delta === undefined) {
-      setViewIdx(null)
-      return
-    }
-
-    if (idx !== undefined) {
-      setViewIdx(idx)
-    }
-    else if (delta !== undefined) {
-      idx = viewIdx! + delta
-      setViewIdx(idx)
-    }
-    timelineItemRefs.current[idx!]?.scrollIntoView({ behavior: "smooth", block: "center" })
-  }
 
   const startPredict = async () => {
     await initProgress()
@@ -476,7 +454,6 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
         simCount,
         (progress) => {
           setRecords((prevs) => {
-            console.log(ac.signal.aborted)
             if (!ac.signal.aborted) {
               return [
                 ...prevs,
@@ -495,7 +472,7 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
         },
         ac.signal
       )
-      await new Promise((resolve)=>setTimeout(resolve, 200))
+      await new Promise((resolve) => setTimeout(resolve, 400))
       setRecords((prevs) => {
         const lastState = prevs[prevs.length - 1].state
         return [
@@ -527,41 +504,117 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
 
   useEffect(() => {
     if (records.length === 0) {
-      changeViewIdx({})
+      setViewIdx(null)
     }
     else {
-      changeViewIdx({ idx: records.length - 1 })
-      requestAnimationFrame(() => {
-        timelineItemRefs.current[timelineItemRefs.current.length - 1]?.scrollIntoView({ behavior: "smooth", block: "center" })
-      })
+      setViewIdx(records.length - 1)
     }
   }, [records])
 
   useEffect(() => {
-    let prevTime: number | null = null
-    let items: { label: string | undefined; color: string | undefined; children: JSX.Element }[] = []
+    let items: TimelineItemProps[] = []
     timelineItemRefs.current = []
     records.forEach((item, idx) => {
-      items.push({
-        label: prevTime === item.time ? undefined : item.time.toFixed(2),
-        color: idx === viewIdx ? "red" : prevTime === item.time ? "gray" : undefined,
-        children: (
-          <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
-            font-weight: ${idx === viewIdx ? "bold" : "normal"};
-          `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
-          >
-            {
-              typeof item.info === "string" ? item.info : (
-                actionStatusMapper[item.info.action_type as ActionStatusIdx]
-              )
-            }
-          </a>
-        )
-      })
-      prevTime = item.time
+      if (typeof item.info === "string") {
+        items.push({
+          label: item.time.toFixed(2),
+          color: idx === viewIdx ? "red" : undefined,
+          children: (
+            <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
+              font-weight: ${idx === viewIdx ? "bold" : "normal"};
+            `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+            >
+              {item.info}
+            </a>
+          )
+        })
+      }
+      else {
+        if (actionStatusMapper[item.info.action_type] === "wait") {
+          items.push({
+            label: item.time.toFixed(2),
+            dot: <ClockCircleOutlined />,
+            color: idx === viewIdx ? "red" : undefined,
+            children: (
+              <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
+                font-weight: ${idx === viewIdx ? "bold" : "normal"};
+              `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+              >
+                wait
+              </a>
+            )
+          })
+        }
+        else {
+          items.push({
+            color: idx === viewIdx ? "red" : "gray",
+            children: (
+              <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
+                font-weight: ${idx === viewIdx ? "bold" : "normal"};
+              `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+              >
+                {
+                  (() => {
+                    const AGV = item.state.AGVs[item.info.AGV_id!]
+                    switch (actionStatusMapper[(item.info as Action).action_type]) {
+                      case "move":
+                        return (
+                          <div>
+                            move
+                            <Flex vertical>
+                              <Typography.Text>id: {AGV.id}</Typography.Text>
+                              <Typography.Text>path: {`${AGV.position} -> ${AGV.target_machine}`}</Typography.Text>
+                            </Flex>
+                          </div>
+                        )
+                      case "pick":
+                        {
+                          const item = AGV.target_item!
+                          return (
+                            <div>
+                              pick
+                              <Flex vertical>
+                                <Typography.Text>id: {AGV.id}</Typography.Text>
+                                <Typography.Text>path: {`${AGV.position} -> ${AGV.target_machine}`}</Typography.Text>
+                                <Typography.Text>item: {`${item.from} -> ${item.to}`}</Typography.Text>
+                              </Flex>
+                            </div>
+                          )
+                        }
+                      case "transport":
+                        {
+                          const item = AGV.loaded_item!
+                          return (
+                            <div>
+                              transoport
+                              <Flex vertical>
+                                <Typography.Text>id: {AGV.id}</Typography.Text>
+                                <Typography.Text>path: {`${AGV.position} -> ${AGV.target_machine}`}</Typography.Text>
+                                <Typography.Text>item: {`${item.from} -> ${item.to}`}</Typography.Text>
+                              </Flex>
+                            </div>
+                          )
+                        }
+                      default:
+                        throw "wrong action_type"
+                    }
+                  })()
+                }
+              </a>
+            )
+          })
+        }
+      }
     })
     setTimelineItems(items)
-  }, [records, viewIdx])
+  }, [viewIdx])
+
+  useLayoutEffect(() => {
+    if (viewIdx !== null) {
+      const lastRecord = timelineItemRefs.current[viewIdx]
+      lastRecord!.scrollIntoView({ behavior: "smooth", block: "center" })
+    }
+  }, [timelineItems])
 
   return (
     <>
@@ -648,12 +701,12 @@ const EnvViewer: FC<{ className?: string, state: EnvState, onReture: () => void 
                         width: 100%;
                       `}>
                         <Button shape="circle"
-                          onClick={() => changeViewIdx({ delta: -1 })}
+                          onClick={() => setViewIdx((prev) => prev! - 1)}
                           disabled={records.length === 0 || viewIdx === 0 || viewIdx === null}
                           icon={<LeftOutlined />}
                         />
                         <Button shape="circle"
-                          onClick={() => changeViewIdx({ delta: 1 })}
+                          onClick={() => setViewIdx((prev) => prev! + 1)}
                           disabled={records.length === 0 || viewIdx === records.length - 1 || viewIdx === null}
                           icon={<RightOutlined />}
                         />
