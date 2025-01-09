@@ -49,7 +49,7 @@ async def get_local_save(
 
 
 @app.post("/env/local")
-async def get_local_save(
+async def set_local_save(
     path: Annotated[Path, Query()],
     state: Annotated[EnvState, Body()],
 ) -> None:
@@ -70,6 +70,14 @@ async def init_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
 @app.put("/env/reset")
 async def reset_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
     return graph.reset()
+
+
+@app.post("/env/paths")
+async def get_paths(
+    graph: Annotated[Graph, Depends(use_graph)]
+) -> dict[int, dict[int, tuple[list[int], float]]]:
+    graph.calc_distance()
+    return graph.get_paths()
 
 
 @app.put("/operation/add")
@@ -131,7 +139,7 @@ async def remove_model(model_path: Annotated[str, Query()]):
     models.pop(model_path)
 
 
-@app.websocket("/test/predict")
+@app.websocket("/predict")
 async def predict(
     websocket: WebSocket,
     model_path: Annotated[str, Query()],

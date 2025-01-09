@@ -52,7 +52,7 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
         border: 1px solid gray;
         border-radius: 10px;
         padding: 5px;
-        max-height: 280px; 
+        max-height: 290px; 
         overflow: auto;
         margin-top: 10px;
       `}>

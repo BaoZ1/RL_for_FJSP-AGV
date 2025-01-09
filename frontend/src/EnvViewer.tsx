@@ -4,17 +4,20 @@ import { useEffect, useState, MouseEvent, WheelEvent, useRef, useLayoutEffect } 
 import {
   Button, Card, Flex, FloatButton, Layout, Splitter,
   Typography, Dropdown, InputNumber, Modal, Timeline, TimelineItemProps, Empty,
+  Progress,
 } from "antd"
 import {
   BaseFC, operationStatusMapper, OperationStatus, OperationStatusIdx, Action,
-  AGVState, EnvState, MachineState, OperationState, actionStatusMapper
+  AGVState, EnvState, MachineState, OperationState, actionStatusMapper,
+  Paths,
+  AGVStatusMapper,
+  MachineStatusMapper
 } from "./types"
 import { css } from "@emotion/react"
 import { offset, useClientPoint, useFloating, useHover, useInteractions } from "@floating-ui/react"
 import { AimOutlined, CaretRightFilled, ClockCircleOutlined, CloseOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
-import { initEnv, loadModel, modelList, predict, removeModel } from "./backend-api"
+import { getPaths, initEnv, loadModel, modelList, predict, removeModel } from "./backend-api"
 import { open } from "@tauri-apps/plugin-dialog"
-import { JSX } from "@emotion/react/jsx-runtime"
 
 const operationColor = {
   blocked: "#5b5b5b",
@@ -25,7 +28,9 @@ const operationColor = {
 } as const satisfies Record<OperationStatus, string>
 
 const OperationNode: BaseFC<{
-  operation: { id: number, statusIdx: OperationStatusIdx, x: number, y: number },
+  timestamp: number,
+  operation: OperationState,
+  pos: { x: number, y: number },
   radius: number,
   scaleRate: number
 }> = (props) => {
@@ -41,9 +46,9 @@ const OperationNode: BaseFC<{
         border: 2px solid black;
         transform: translate(-50%, -50%);
         position: absolute;
-        left: ${props.operation.x}px;
-        top: ${props.operation.y}px;
-        background-color: ${operationColor[operationStatusMapper[props.operation.statusIdx]]};
+        left: ${props.pos.x}px;
+        top: ${props.pos.y}px;
+        background-color: ${operationColor[operationStatusMapper[props.operation.status]]};
         display: flex;
         justify-content: center;
         align-items: center;
@@ -51,16 +56,80 @@ const OperationNode: BaseFC<{
       `}
     >
       {props.operation.id}
+      {
+        (
+          () => {
+            const style = css`
+              position: absolute;
+              bottom: -15px;
+            `
+            switch (operationStatusMapper[props.operation.status]) {
+              case "blocked":
+              case "unscheduled":
+              case "waiting":
+                {
+                  if (props.operation.predecessors.length !== 0) {
+                    const total = props.operation.predecessors.length
+                    const arrived = props.operation.arrived_preds.length
+                    return <Progress percent={arrived / total * 100} steps={total} showInfo={false} css={style} />
+                  }
+                  break
+                }
+              case "processing":
+                {
+                  const total = props.operation.process_time
+                  const rest = props.operation.finish_timestamp - props.timestamp
+                  return <Progress percent={(1 - rest / total) * 100} showInfo={false} css={style} />
+                }
+              case "finished":
+                {
+                  if (props.operation.successors.length !== 0) {
+                    const total = props.operation.successors.length
+                    const sent = props.operation.sent_succs.length
+                    return <Progress percent={sent / total * 100} steps={total} showInfo={false} css={style} />
+                  }
+                  break
+                }
+            }
+          }
+        )()
+      }
     </div>
   )
 }
 
 const OperationLine: BaseFC<{
-  p: { id: number, x: number, y: number },
-  s: { id: number, x: number, y: number },
+  timestamp: number,
+  pState: OperationState,
+  pPos: { x: number, y: number },
+  sState: OperationState,
+  sPos: { x: number, y: number },
+  AGVinfo: { state: AGVState, dist: number } | undefined,
   nodeRadius: number,
   scaleRate: number
 }> = (props) => {
+  const [travelPercent, setTravelPercent] = useState<number | null>(null)
+  useEffect(() => {
+    if (props.AGVinfo === undefined) {
+      setTravelPercent(null)
+    }
+    else {
+      const total = props.AGVinfo.dist / props.AGVinfo.state.speed
+      const rest = props.AGVinfo.state.finish_timestamp - props.timestamp
+      console.log(
+        props.pState.id,
+        props.sState.id,
+        props.AGVinfo.state.id,
+        props.AGVinfo.state.position,
+        props.AGVinfo.state.target_machine,
+        props.AGVinfo.state.speed,
+        props.AGVinfo.dist,
+        rest
+      )
+      setTravelPercent((1 - rest / total) * 100)
+    }
+  }, [props.AGVinfo, props.timestamp])
+
   const [isOpen, setIsOpen] = useState(false);
   const scaleRateRef = useRef(props.scaleRate)
   useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
@@ -85,12 +154,12 @@ const OperationLine: BaseFC<{
   const hover = useHover(context);
   const { getReferenceProps, getFloatingProps } = useInteractions([clientPoint, hover]);
 
-  const raw_len = Math.hypot(props.s.x - props.p.x, props.s.y - props.p.y)
+  const raw_len = Math.hypot(props.sPos.x - props.pPos.x, props.sPos.y - props.pPos.y)
   const len = raw_len - props.nodeRadius * 2
-  const rot = Math.asin((props.s.y - props.p.y) / raw_len)
+  const rot = Math.asin((props.sPos.y - props.pPos.y) / raw_len)
 
-  const center_x = (props.p.x + props.s.x) / 2 - len / 2
-  const center_y = (props.p.y + props.s.y) / 2
+  const center_x = (props.pPos.x + props.sPos.x) / 2 - len / 2
+  const center_y = (props.pPos.y + props.sPos.y) / 2
 
 
   return (
@@ -98,7 +167,7 @@ const OperationLine: BaseFC<{
       <div className={props.className}
         ref={refs.setReference} {...getReferenceProps()} css={css`
         width: ${len}px;
-        border: 1px ${props.p.id === 0 || props.s.id === 9999 ? "dashed" : "solid"} black;
+        border: 1px ${props.pState.id === 0 || props.sState.id === 9999 ? "dashed" : "solid"} black;
         position: absolute;
         rotate: ${rot}rad;
         left: calc(50% + ${center_x}px);
@@ -107,9 +176,9 @@ const OperationLine: BaseFC<{
         :hover {
           border-color: red;
           z-index: 4;
-          & > * {
+          /* & > * {
             color: red;
-          }
+          } */
         }
       `}
       >
@@ -118,6 +187,25 @@ const OperationLine: BaseFC<{
           right: 0;
           translate: 40% -50%;
         `} />
+        {
+          props.AGVinfo && (
+            <div css={css`
+              width: 17px;
+              height: 17px;
+              background-color: black;
+              border: 2px solid yellow;
+              color: white;
+              position: absolute;
+              left: ${travelPercent}%;
+              translate: -50% -50%;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+            `}>
+              {props.AGVinfo.state.id}
+            </div>
+          )
+        }
       </div>
       {isOpen && (
         <div
@@ -133,7 +221,7 @@ const OperationLine: BaseFC<{
             z-index: 5;
           `}
         >
-          {`${props.p.id}->${props.s.id}`}
+          {`${props.pState.id}->${props.sState.id}`}
         </div>
       )}
     </>
@@ -141,10 +229,10 @@ const OperationLine: BaseFC<{
 }
 
 const OperationViewer: BaseFC<{
-  states: OperationState[],
-  AGVs: AGVState[],
+  state: EnvState,
+  paths: Paths
 }> = (props) => {
-  const [operationInfoList, setOperationInfoList] = useState<{ id: number, statusIdx: OperationStatusIdx, x: number, y: number }[]>([])
+  const [operationInfoList, setOperationInfoList] = useState<{ id: number, pos: { x: number, y: number } }[]>([])
 
   const colSpace = 150
   const rowSpace = 125
@@ -156,7 +244,7 @@ const OperationViewer: BaseFC<{
       id: number,
       remains: number[],
       preds_pos: number[]
-    }[] = props.states.map((item) => ({ id: item.id, remains: item.predecessors, preds_pos: [] }))
+    }[] = props.state.operations.map((item) => ({ id: item.id, remains: item.predecessors, preds_pos: [] }))
 
     const layers: number[][] = []
 
@@ -185,20 +273,21 @@ const OperationViewer: BaseFC<{
       }
       layers.push(new_layer)
     }
-    const info_list: { id: number, statusIdx: OperationStatusIdx, x: number, y: number }[] = []
+    const info_list: { id: number, pos: { x: number, y: number } }[] = []
     for (const [col_idx, col] of layers.entries()) {
       for (const [idx, id] of col.entries()) {
         info_list.push({
           id,
-          statusIdx: props.states.find((item) => item.id === id)!.status as OperationStatusIdx,
-          x: (col_idx - layers.length / 2 + 0.5) * colSpace,
-          y: (idx - col.length / 2 + 0.5) * rowSpace
+          pos: {
+            x: (col_idx - layers.length / 2 + 0.5) * colSpace,
+            y: (idx - col.length / 2 + 0.5) * rowSpace
+          }
         })
       }
     }
     setOperationInfoList(info_list)
   }
-  useEffect(fix_sort, [props.states])
+  useEffect(fix_sort, [props.state.operations])
 
   const [graphOffset, setGraphOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
   const [scaleRatio, setScaleRatio] = useState<number>(1)
@@ -249,18 +338,43 @@ const OperationViewer: BaseFC<{
         scale: ${scaleRatio};
       `}>
         {
-          operationInfoList.map((s) => (
-            props.states.find((item) => item.id === s.id)!.predecessors.map((pred_id) => (
+          operationInfoList.map(({ id, pos }) => (
+            props.state.operations.find((item) => item.id === id)!.predecessors.map((pred_id) => (
               operationInfoList.find((item) => item.id === pred_id)!
             )).map((p) => (
-              <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRate={scaleRatio} />
+              <OperationLine
+                key={`${p.id}-${id}`}
+                timestamp={props.state.timestamp}
+                pState={props.state.operations.find((state) => state.id === p.id)!} pPos={p.pos}
+                sState={props.state.operations.find((state) => state.id === id)!} sPos={pos}
+                AGVinfo={
+                  (
+                    () => {
+                      const agv = props.state.AGVs.find((agv) => (
+                        AGVStatusMapper[agv.status] === "transporting"
+                        && agv.loaded_item?.from === p.id
+                        && agv.loaded_item.to === id
+                        && agv.finish_timestamp > props.state.timestamp
+                      ))
+                      if (agv === undefined) {
+                        return undefined
+                      }
+                      return {
+                        state: agv,
+                        dist: props.paths[agv.position][agv.target_machine][1]
+                      }
+                    }
+                  )()
+                }
+                nodeRadius={nodeRadius} scaleRate={scaleRatio} />
             ))
           ))
         }
         {
-          operationInfoList.map((operation) => (
-            <OperationNode key={operation.id} operation={operation}
-              radius={nodeRadius} scaleRate={scaleRatio}
+          operationInfoList.map(({ id, pos }) => (
+            <OperationNode key={id} timestamp={props.state.timestamp}
+              operation={props.state.operations.find((item) => item.id === id)!}
+              pos={pos} radius={nodeRadius} scaleRate={scaleRatio}
             />
           ))
         }
@@ -275,7 +389,10 @@ const OperationViewer: BaseFC<{
 }
 
 
-const MachineNode: BaseFC<{ state: MachineState }> = (props) => {
+const MachineNode: BaseFC<{
+  state: MachineState,
+  operation: OperationState | undefined
+}> = (props) => {
 
   return (
     <div className={props.className}
@@ -291,24 +408,70 @@ const MachineNode: BaseFC<{ state: MachineState }> = (props) => {
       `}
     >
       {props.state.id}
+      {
+        MachineStatusMapper[props.state.status] === "working" && (
+          <>
+            <div css={css`
+              position: absolute;
+              top: 0;
+              right: 0;
+              translate: 30% -30%;
+              width: 25px;
+              height: 25px;
+              background-color: ${operationColor["processing"]};
+              color: black;
+              font-size: small;
+              border-radius: 50%;
+              border: 2px solid black;
+              overflow: hidden;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+            `}>
+              {props.operation!.id}
+            </div>
+          </>
+        )
+      }
     </div>
   )
 }
 
-const MachinePath: BaseFC = (props) => {
+const MachinePath: BaseFC<{
+  timestamp: number,
+  fState: MachineState,
+  tState: MachineState,
+  scaleRatio: number,
+  possibleAGVs: AGVState[],
+  paths: Paths
+}> = (props) => {
+  const pos1 = props.fState.pos
+  const pos2 = props.tState.pos
+
+  const dx = pos1.x - pos2.x
+  const dy = pos1.y - pos2.y
+  const len = Math.hypot(dx, dy) * props.scaleRatio
+  const rot = Math.PI - Math.atan2(dy, dx)
 
   return (
     <div className={props.className} css={css`
-        
-      `}
-    />
+      position: absolute;
+      width: ${len}px;
+      border: 1px solid black;
+      transform-origin: 0% 50%;
+      rotate: ${rot}rad;
+      left: ${pos1.x * props.scaleRatio}px;
+      bottom: ${pos1.y * props.scaleRatio}px;
+    `}
+    >
+      {/* TODO 添加对出于当前路径上的AGV的筛选和绘制*/}
+    </div>
   )
 }
 
 const MachineViewer: BaseFC<{
-  states: MachineState[],
-  paths: [number, number][],
-  AGVs: AGVState[],
+  state: EnvState,
+  paths: Paths
 }> = (props) => {
   const [scaleRatio, setScaleRatio] = useState<number>(1)
   const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
@@ -355,8 +518,9 @@ const MachineViewer: BaseFC<{
         left: calc(50% + ${offset.x}px);
       `}>
         {
-          props.states.map((state) => (
+          props.state.machines.map((state) => (
             <MachineNode key={state.id} state={state}
+              operation={props.state.operations.find((op) => state.working_operation === op.id)}
               css={css`
                 position: absolute;
                 bottom: ${state.pos.y * scaleRatio}px;
@@ -368,24 +532,24 @@ const MachineViewer: BaseFC<{
           ))
         }
         {
-          props.paths.map(([f_id, t_id]) => {
-            const pos1 = props.states.find((item) => item.id == f_id)!.pos
-            const pos2 = props.states.find((item) => item.id == t_id)!.pos
-
-            const dx = pos1.x - pos2.x
-            const dy = pos1.y - pos2.y
-            const len = Math.hypot(dx, dy) * scaleRatio
-            const rot = Math.PI - Math.atan2(dy, dx)
+          props.state.direct_paths.map(([f_id, t_id]) => {
             return (
-              <MachinePath key={`${f_id}-${t_id}`} css={css`
-                    position: absolute;
-                    width: ${len}px;
-                    border: 1px solid black;
-                    transform-origin: 0% 50%;
-                    rotate: ${rot}rad;
-                    left: ${pos1.x * scaleRatio}px;
-                    bottom: ${pos1.y * scaleRatio}px;
-                  `}
+              <MachinePath
+                key={`${f_id}-${t_id}`} timestamp={props.state.timestamp}
+                fState={props.state.machines.find((m) => m.id === f_id)!}
+                tState={props.state.machines.find((m) => m.id === t_id)!}
+                scaleRatio={scaleRatio}
+                possibleAGVs={
+                  props.state.AGVs.filter((agv) => (
+                    AGVStatusMapper[agv.status] !== "idle"
+                    && (
+                      props.paths[agv.position][agv.target_machine][0].findIndex((idx) => idx === f_id)
+                      - props.paths[agv.position][agv.target_machine][0].findIndex((idx) => idx === t_id)
+                      === -1
+                    )
+                  ))
+                }
+                paths={props.paths}
               />
             )
           })
@@ -401,6 +565,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const [sampleCount, setSampleCount] = useState<number>(4)
   const [simCount, setSimCount] = useState<number>(20)
 
+  const [paths, setPaths] = useState<Paths>({})
   const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
   const [viewIdx, setViewIdx] = useState<number | null>(null)
 
@@ -412,7 +577,8 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const timelineItemRefs = useRef<HTMLAnchorElement[]>([])
 
   useEffect(() => {
-    (async () => setModelPaths((await modelList())))()
+    (async () => setModelPaths((await modelList())))();
+    (async () => setPaths(await getPaths(props.state)))()
   }, [])
 
   const loadNewModel = async () => {
@@ -688,8 +854,9 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                       width: 100%;
                       height: 100%;
                     `}>
-                      <OperationViewer states={(viewIdx !== null ? records[viewIdx].state : props.state).operations}
-                        AGVs={(viewIdx !== null ? records[viewIdx].state : props.state).AGVs}
+                      <OperationViewer
+                        state={viewIdx !== null ? records[viewIdx].state : props.state}
+                        paths={paths}
                         css={css`
                           width: 100%;
                           height: 100%;
@@ -714,9 +881,9 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                     </div>
                   </Splitter.Panel>
                   <Splitter.Panel min="20%">
-                    <MachineViewer states={(viewIdx !== null ? records[viewIdx].state : props.state).machines}
-                      paths={(viewIdx !== null ? records[viewIdx].state : props.state).direct_paths}
-                      AGVs={(viewIdx !== null ? records[viewIdx].state : props.state).AGVs}
+                    <MachineViewer
+                      state={viewIdx !== null ? records[viewIdx].state : props.state}
+                      paths={paths}
                       css={css`
                         width: 100%;
                         height: 100%;
@@ -745,9 +912,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
         </Layout.Content>
       </Layout>
       <Modal open={isModalOpen} onCancel={() => abortController!.abort()} closable={false}
-        footer={(_, { CancelBtn }) => (
-          <CancelBtn />
-        )}
+        footer={(_, { CancelBtn }) => <CancelBtn />}
       >
         {progress}
       </Modal>

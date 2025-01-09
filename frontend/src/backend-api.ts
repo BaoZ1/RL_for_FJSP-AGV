@@ -1,4 +1,4 @@
-import { AddOperationParams, EnvState, GenerationParams, PredictProgress } from "./types"
+import { AddOperationParams, AGVState, EnvState, GenerationParams, Paths, PredictProgress } from "./types"
 import { fetch } from "@tauri-apps/plugin-http"
 import WebSocket from '@tauri-apps/plugin-websocket';
 
@@ -51,6 +51,22 @@ export const initEnv = async (state: EnvState) => {
   return await response.json() as EnvState
 }
 
+export const getPaths = async (state: EnvState) => {
+  const url = new URL("env/paths", BASE_PATH)
+  const response = await fetch(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    }
+  )
+  if (!response.ok) {
+    console.log(await response.text())
+  }
+  return await response.json() as Paths
+}
+
 export const addOperation = async (state: EnvState, params: AddOperationParams) => {
   console.log(params);
 
@@ -88,6 +104,7 @@ export const removeOperation = async (state: EnvState, target: number) => {
   console.log(ret);
   return ret as EnvState
 }
+
 
 export const addPath = async (state: EnvState, a: number, b: number) => {
   const url = new URL("path/add", BASE_PATH)
@@ -165,7 +182,7 @@ export const predict = async (
   search_params.append("sample_count", sample_count.toString())
   search_params.append("sim_count", sim_count.toString())
 
-  const ws = await WebSocket.connect(`ws://localhost:${PORT}/test/predict?${search_params.toString()}`)
+  const ws = await WebSocket.connect(`ws://localhost:${PORT}/predict?${search_params.toString()}`)
 
   await ws.send(JSON.stringify(state))
 

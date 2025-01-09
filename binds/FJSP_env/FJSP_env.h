@@ -143,6 +143,7 @@ public:
     void add_path(MachineId, MachineId);
     void remove_path(MachineId, MachineId);
     void calc_distance();
+    map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> get_paths();
     float get_travel_time(MachineId, MachineId, AGVId) const;
 
     static shared_ptr<Graph> rand_generate(GenerateParam);

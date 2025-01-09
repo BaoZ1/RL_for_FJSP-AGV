@@ -1460,11 +1460,7 @@ class Agent(L.LightningModule):
                 sample_count,
                 sim_count,
             )
-            (
-                _,
-                dones,
-                _,
-            ) = env.step(actions, False)
+            env.step(actions, False)
 
             finished_step, total_step = env.envs[0].progress()
 

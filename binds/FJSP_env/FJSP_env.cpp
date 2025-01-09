@@ -701,6 +701,18 @@ void Graph::calc_distance()
     }
 }
 
+map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> Graph::get_paths()
+{
+    assert(!this->distances.empty() && !this->paths.empty());
+    map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> ret;
+    for(auto f_id : this->machines | views::keys){
+        for(auto t_id : this->machines | views::keys) {
+            ret[f_id][t_id] = make_tuple(this->paths.at(f_id).at(t_id), this->distances.at(f_id).at(t_id));
+        }
+    }
+    return ret;
+}
+
 float Graph::get_travel_time(MachineId from, MachineId to, AGVId agv) const
 {
     return this->distances.at(from).at(to) / this->AGVs.at(agv)->speed;

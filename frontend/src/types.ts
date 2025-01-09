@@ -18,6 +18,7 @@ export type OperationState = {
   id: number
   status: OperationStatusIdx
   machine_type: number
+  process_time: number
   processing_machine: number | null
   finish_timestamp: number
   predecessors: number[]
@@ -26,20 +27,41 @@ export type OperationState = {
   sent_succs: number[]
 }
 
+export const MachineStatusMapper = {
+  0: "idle",
+  1: "waiting_material",
+  2: "working"
+} as const
+
+export type MachineStatusIdx = keyof typeof MachineStatusMapper
+
+export type MachineStatus = (typeof MachineStatusMapper)[MachineStatusIdx]
+
 export type MachineState = {
   id: number
   type: number
   pos: { x: number, y: number }
-  status: number
+  status: MachineStatusIdx
   working_operation: number | null
   waiting_operation: number | null
   materials: { from: number, to: number }[]
   products: { from: number, to: number }[]
 }
 
+export const AGVStatusMapper = {
+  0: "idle",
+  1: "moving",
+  2: "picking",
+  3: "transporting"
+} as const
+
+export type AGVStatusIdx = keyof typeof AGVStatusMapper
+
+export type AGVStatus = (typeof AGVStatusMapper)[AGVStatusIdx]
+
 export type AGVState = {
   id: number
-  status: number
+  status: AGVStatusIdx
   speed: number
   position: number
   target_machine: number
@@ -58,6 +80,12 @@ export type EnvState = {
   next_operation_id: number
   next_machine_id: number
   next_AGV_id: number
+}
+
+export type Paths = {
+  [from: number]: {
+    [to: number]: [number[], number]
+  }
 }
 
 export const actionStatusMapper = {
