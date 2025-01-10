@@ -49,7 +49,10 @@ PYBIND11_MODULE(FJSP_env, m)
     py::class_<Action, shared_ptr<Action>>(m, "Action")
         .def(py::init<ActionType>(), "action_type"_a)
         .def(py::init<ActionType, AGVId, MachineId>(), "action_type"_a, "AGV_id"_a, "target_machine"_a)
-        .def(py::init<ActionType, AGVId, MachineId, Product>(), "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_product"_a)
+        .def(
+            py::init<ActionType, AGVId, MachineId, Product>(),
+            "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_product"_a
+        )
         .def_readwrite("action_type", &Action::type)
         .def_readwrite("AGV_id", &Action::act_AGV)
         .def_readwrite("target_machine", &Action::target_machine)
@@ -57,7 +60,12 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("__repr__", &Action::repr);
 
     py::class_<GenerateParam, shared_ptr<GenerateParam>>(m, "GenerateParam")
-        .def(py::init<size_t, size_t, size_t, size_t, float, float, float, float, float>(), "operation_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a, "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a, "max_process_time"_a);
+        .def(
+            py::init<size_t, size_t, size_t, size_t, float, float, float, float, float, bool>(),
+            "operation_count"_a, "machine_count"_a, "AGV_count"_a, "machine_type_count"_a,
+            "min_transport_time"_a, "max_transport_time"_a, "min_max_speed_ratio"_a, "min_process_time"_a,
+            "max_process_time"_a, "simple_mode"_a
+        );
 
     py::class_<Graph, shared_ptr<Graph>>(m, "Graph")
         .def(py::init<>())
@@ -66,7 +74,10 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("get_operations_id", &Graph::get_operations_id)
         .def("get_machines_id", &Graph::get_machines_id)
         .def("get_AGVs_id", &Graph::get_AGVs_id)
-        .def("insert_operation", &Graph::insert_operation, "machine_type"_a, "process_time"_a, "predecessors"_a = nullopt, "successors"_a = nullopt)
+        .def(
+            "insert_operation", &Graph::insert_operation,
+            "machine_type"_a, "process_time"_a, "predecessors"_a = nullopt, "successors"_a = nullopt
+        )
         .def("remove_operation", &Graph::remove_operation, "operation_id"_a)
         .def("get_operation", &Graph::get_operation, "operation_id"_a)
         .def("add_machine", &Graph::add_machine, "machine_type"_a, "position"_a)
@@ -112,7 +123,7 @@ PYBIND11_MODULE(FJSP_env, m)
         .def_readonly("AGV_position", &GraphFeature::AGV_position)
         .def_readonly("AGV_target", &GraphFeature::AGV_target)
         .def_readonly("AGV_loaded", &GraphFeature::AGV_loaded);
-    
+
     py::class_<IdIdxMapper, shared_ptr<IdIdxMapper>>(m, "IdIdxMapper")
         .def_readonly("operation", &IdIdxMapper::operation)
         .def_readonly("machine", &IdIdxMapper::machine)

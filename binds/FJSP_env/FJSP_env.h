@@ -90,6 +90,7 @@ struct GenerateParam
     float min_max_speed_ratio;
     float min_process_time;
     float max_process_time;
+    bool simple_mode;
 };
 
 struct GraphFeature;

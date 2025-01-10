@@ -4,6 +4,7 @@ import { useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "re
 import {
   Splitter, Button, Layout, Card, Empty, Flex, Modal,
   Form, InputNumber, Space, FormInstance, FloatButton, Select,
+  Checkbox,
 } from "antd"
 import { open } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
@@ -517,7 +518,7 @@ const MachineEditor: BaseFC<{
   onMachineClicked: (id: number) => void,
   onMachineDragged: (id: number, dx: number, dy: number) => void
 }> = (props) => {
-  const [scaleRatio, setScaleRatio] = useState<number>(1)
+  const [scaleRatio, setScaleRatio] = useState<number>(5)
   const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
 
   const [isDragging, setIsDragging] = useState(false)
@@ -715,13 +716,13 @@ const AddOperationConfigForm: BaseFC<{
     typeMap.set(machine.type, [...(typeMap.get(machine.type) || []), machine.id])
   })
 
-  const machineTypes = Array.from(typeMap.entries()).map(([type, machines]) => {
-    return {
+  const machineTypes = Array.from(typeMap.entries()).map(([type, machines]) => (
+    {
       label: `${type} (${machines})`,
       disabled: type === 0,
       value: type
     }
-  })
+  ))
 
   return (
     <Form className={props.className} form={props.formData} onFinish={props.onFinish}>
@@ -812,7 +813,8 @@ const RandParamConfigForm: BaseFC<{
       max_transport_time: 15,
       min_max_speed_ratio: 0.8,
       min_process_time: 8,
-      max_process_time: 15
+      max_process_time: 15,
+      simple_mode: false
     }}
       onFinish={props.onFinish}
     >
@@ -855,6 +857,9 @@ const RandParamConfigForm: BaseFC<{
       </Form.Item>
       <Form.Item<GenerationParams> name="min_max_speed_ratio" label="速度差异">
         <InputNumber min={0.3} max={1} step={0.05} />
+      </Form.Item>
+      <Form.Item<GenerationParams> name="simple_mode" label="简单模式" valuePropName="checked">
+        <Checkbox/>
       </Form.Item>
       <Form.Item>
         <Button type="primary" htmlType="submit">确定</Button>

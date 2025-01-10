@@ -5,6 +5,8 @@ import {
   Button, Card, Flex, FloatButton, Layout, Splitter,
   Typography, Dropdown, InputNumber, Modal, Timeline, TimelineItemProps, Empty,
   Progress,
+  Space,
+  Slider,
 } from "antd"
 import {
   BaseFC, operationStatusMapper, OperationStatus, OperationStatusIdx, Action,
@@ -116,16 +118,6 @@ const OperationLine: BaseFC<{
     else {
       const total = props.AGVinfo.dist / props.AGVinfo.state.speed
       const rest = props.AGVinfo.state.finish_timestamp - props.timestamp
-      console.log(
-        props.pState.id,
-        props.sState.id,
-        props.AGVinfo.state.id,
-        props.AGVinfo.state.position,
-        props.AGVinfo.state.target_machine,
-        props.AGVinfo.state.speed,
-        props.AGVinfo.dist,
-        rest
-      )
       setTravelPercent((1 - rest / total) * 100)
     }
   }, [props.AGVinfo, props.timestamp])
@@ -172,7 +164,7 @@ const OperationLine: BaseFC<{
         rotate: ${rot}rad;
         left: calc(50% + ${center_x}px);
         top: calc(50% + ${center_y}px);
-        z-index: 0;
+        z-index: ${props.AGVinfo !== undefined ? 5 : 0};
         :hover {
           border-color: red;
           z-index: 4;
@@ -201,6 +193,7 @@ const OperationLine: BaseFC<{
               display: flex;
               justify-content: center;
               align-items: center;
+              z-index: 10;
             `}>
               {props.AGVinfo.state.id}
             </div>
@@ -229,6 +222,7 @@ const OperationLine: BaseFC<{
 }
 
 const OperationViewer: BaseFC<{
+  timestamp: number,
   state: EnvState,
   paths: Paths
 }> = (props) => {
@@ -344,7 +338,7 @@ const OperationViewer: BaseFC<{
             )).map((p) => (
               <OperationLine
                 key={`${p.id}-${id}`}
-                timestamp={props.state.timestamp}
+                timestamp={props.timestamp}
                 pState={props.state.operations.find((state) => state.id === p.id)!} pPos={p.pos}
                 sState={props.state.operations.find((state) => state.id === id)!} sPos={pos}
                 AGVinfo={
@@ -372,7 +366,7 @@ const OperationViewer: BaseFC<{
         }
         {
           operationInfoList.map(({ id, pos }) => (
-            <OperationNode key={id} timestamp={props.state.timestamp}
+            <OperationNode key={id} timestamp={props.timestamp}
               operation={props.state.operations.find((item) => item.id === id)!}
               pos={pos} radius={nodeRadius} scaleRate={scaleRatio}
             />
@@ -457,23 +451,67 @@ const MachinePath: BaseFC<{
     <div className={props.className} css={css`
       position: absolute;
       width: ${len}px;
-      border: 1px solid black;
+      border: 1px solid ${pos1.x > pos2.x ? "black" : "transparent"};
       transform-origin: 0% 50%;
       rotate: ${rot}rad;
       left: ${pos1.x * props.scaleRatio}px;
       bottom: ${pos1.y * props.scaleRatio}px;
+      z-index: ${pos1.x > pos2.x ? "0" : 5};
     `}
     >
-      {/* TODO 添加对出于当前路径上的AGV的筛选和绘制*/}
+      {
+        props.possibleAGVs.map((agv) => {
+          const [path, total_dist] = props.paths[agv.position][agv.target_machine]
+          const finished_dist = total_dist - (agv.finish_timestamp - props.timestamp) * agv.speed
+          let path_idx = 0
+          let from = agv.position
+          let to = path[path_idx]
+          let sum_dist = 0
+          while (sum_dist + props.paths[from][to][1] < finished_dist) {
+            sum_dist += props.paths[from][to][1]
+            path_idx += 1
+            from = to
+            to = path[path_idx]
+          }
+          if (from === props.fState.id && to === props.tState.id) {
+            const finished_len = finished_dist - sum_dist
+            const total_len = props.paths[props.fState.id][props.tState.id][1]
+            const percent = finished_len / total_len * 100
+            return (
+              <div key={agv.id} css={css`
+                width: 17px;
+                height: 17px;
+                background-color: black;
+                border: 2px solid yellow;
+                color: white;
+                position: absolute;
+                left: ${percent}%;
+                translate: -50% -50%;
+                rotate: ${pos1.x > pos2.x ? "180deg" : 0};
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 10;
+              `}>
+                {agv.id}
+              </div>
+            )
+          }
+          else {
+            return undefined
+          }
+        })
+      }
     </div>
   )
 }
 
 const MachineViewer: BaseFC<{
+  timestamp: number,
   state: EnvState,
   paths: Paths
 }> = (props) => {
-  const [scaleRatio, setScaleRatio] = useState<number>(1)
+  const [scaleRatio, setScaleRatio] = useState<number>(5)
   const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
 
   const trackDrag = (e: MouseEvent) => {
@@ -535,7 +573,7 @@ const MachineViewer: BaseFC<{
           props.state.direct_paths.map(([f_id, t_id]) => {
             return (
               <MachinePath
-                key={`${f_id}-${t_id}`} timestamp={props.state.timestamp}
+                key={`${f_id}-${t_id}`} timestamp={props.timestamp}
                 fState={props.state.machines.find((m) => m.id === f_id)!}
                 tState={props.state.machines.find((m) => m.id === t_id)!}
                 scaleRatio={scaleRatio}
@@ -568,6 +606,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const [paths, setPaths] = useState<Paths>({})
   const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
   const [viewIdx, setViewIdx] = useState<number | null>(null)
+  const [timestamp, setTimestamp] = useState<number>(0)
 
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false)
   const [abortController, setAbortController] = useState<AbortController | null>(null)
@@ -580,6 +619,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
     (async () => setModelPaths((await modelList())))();
     (async () => setPaths(await getPaths(props.state)))()
   }, [])
+
 
   const loadNewModel = async () => {
     const path = await open()
@@ -668,12 +708,24 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
     setIsModalOpen(false)
   }
 
+  const jumpToRecord = (idx: number | null) => {
+    setViewIdx(idx)
+    setTimestamp(idx !== null ? records[idx].time : 0)
+  }
+
+  const jumpToTimestamp = (timestamp: number) => {
+    setTimestamp(timestamp)
+    let targetIdx = -1
+    records.forEach((record) => targetIdx += +(record.time <= timestamp))
+    setViewIdx(Math.max(targetIdx, 0))
+  }
+
   useEffect(() => {
     if (records.length === 0) {
-      setViewIdx(null)
+      jumpToRecord(null)
     }
     else {
-      setViewIdx(records.length - 1)
+      jumpToRecord(records.length - 1)
     }
   }, [records])
 
@@ -688,7 +740,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
           children: (
             <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
               font-weight: ${idx === viewIdx ? "bold" : "normal"};
-            `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+            `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
             >
               {item.info}
             </a>
@@ -704,7 +756,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
             children: (
               <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
                 font-weight: ${idx === viewIdx ? "bold" : "normal"};
-              `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+              `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
               >
                 wait
               </a>
@@ -717,7 +769,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
             children: (
               <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
                 font-weight: ${idx === viewIdx ? "bold" : "normal"};
-              `} onClick={(e) => { e.preventDefault(); setViewIdx(idx) }}
+              `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
               >
                 {
                   (() => {
@@ -855,6 +907,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                       height: 100%;
                     `}>
                       <OperationViewer
+                        timestamp={timestamp}
                         state={viewIdx !== null ? records[viewIdx].state : props.state}
                         paths={paths}
                         css={css`
@@ -862,26 +915,37 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                           height: 100%;
                         `}
                       />
-                      <Flex justify="center" gap={10} css={css`
+                      <Flex vertical justify="center" css={css`
                         position: absolute;
                         bottom: 10px;
                         width: 100%;
                       `}>
-                        <Button shape="circle"
-                          onClick={() => setViewIdx((prev) => prev! - 1)}
-                          disabled={records.length === 0 || viewIdx === 0 || viewIdx === null}
-                          icon={<LeftOutlined />}
-                        />
-                        <Button shape="circle"
-                          onClick={() => setViewIdx((prev) => prev! + 1)}
-                          disabled={records.length === 0 || viewIdx === records.length - 1 || viewIdx === null}
-                          icon={<RightOutlined />}
-                        />
+                        <Flex justify="center" gap={10}>
+                          <Button shape="circle"
+                            onClick={() => jumpToRecord(viewIdx! - 1)}
+                            disabled={records.length === 0 || viewIdx === 0 || viewIdx === null}
+                            icon={<LeftOutlined />}
+                          />
+                          <Button shape="circle"
+                            onClick={() => jumpToRecord(viewIdx! + 1)}
+                            disabled={records.length === 0 || viewIdx === records.length - 1 || viewIdx === null}
+                            icon={<RightOutlined />}
+                          />
+                        </Flex>
+                        <Slider
+                          value={timestamp} onChange={jumpToTimestamp}
+                          tooltip={{ formatter: (v) => v?.toFixed(2) }}
+                          step={0.01}
+                          min={0} max={records.length == 0 ? 0 : records[records.length - 1].time}
+                          disabled={records.length == 0} css={css`
+                          margin: 5px 20px 0;
+                        `} />
                       </Flex>
                     </div>
                   </Splitter.Panel>
                   <Splitter.Panel min="20%">
                     <MachineViewer
+                      timestamp={timestamp}
                       state={viewIdx !== null ? records[viewIdx].state : props.state}
                       paths={paths}
                       css={css`

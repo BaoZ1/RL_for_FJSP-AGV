@@ -705,8 +705,10 @@ map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> Graph::get_paths
 {
     assert(!this->distances.empty() && !this->paths.empty());
     map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> ret;
-    for(auto f_id : this->machines | views::keys){
-        for(auto t_id : this->machines | views::keys) {
+    for (auto f_id : this->machines | views::keys)
+    {
+        for (auto t_id : this->machines | views::keys)
+        {
             ret[f_id][t_id] = make_tuple(this->paths.at(f_id).at(t_id), this->distances.at(f_id).at(t_id));
         }
     }
@@ -785,16 +787,33 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     }
 
     uniform_real_distribution<float> process_time_dist(param.min_process_time, param.max_process_time);
-    discrete_distribution<size_t> prev_count_dist({3, 6, 2, 1});
-    set<OperationId> exist_ids;
-    for (size_t i = 0; i < param.operation_count; i++)
+    if (param.simple_mode)
     {
-        OperationId new_id = ret->add_operation(machine_type_dist(engine), process_time_dist(engine));
-        for (auto p_id : random_unique(exist_ids, min(prev_count_dist(engine), exist_ids.size())))
+        uniform_real_distribution<float> new_series_dist;
+        optional<OperationId> p_id = nullopt;
+        for (size_t i = 0; i < param.operation_count; i++)
         {
-            ret->add_relation(p_id, new_id);
+            OperationId new_id = ret->add_operation(machine_type_dist(engine), process_time_dist(engine));
+            if (p_id.has_value())
+            {
+                ret->add_relation(p_id.value(), new_id);
+            }
+            p_id = new_series_dist(engine) < 1 / sqrt(param.operation_count) ? nullopt : optional{new_id};
         }
-        exist_ids.emplace(new_id);
+    }
+    else
+    {
+        discrete_distribution<size_t> prev_count_dist({3, 6, 2, 1});
+        set<OperationId> exist_ids;
+        for (size_t i = 0; i < param.operation_count; i++)
+        {
+            OperationId new_id = ret->add_operation(machine_type_dist(engine), process_time_dist(engine));
+            for (auto p_id : random_unique(exist_ids, min(prev_count_dist(engine), exist_ids.size())))
+            {
+                ret->add_relation(p_id, new_id);
+            }
+            exist_ids.emplace(new_id);
+        }
     }
 
     return ret;
@@ -1470,10 +1489,9 @@ void Graph::wait_AGV()
         machine->materials.emplace(AGV->loaded_item.value());
         operation->arrived_preds.emplace(AGV->loaded_item->from);
         AGV->loaded_item = nullopt;
-        bool processable = operation->arrived_preds.size() == operation->predecessors.size();
-        processable &= machine->status == MachineStatus::waiting_material;
-        processable &= operation->status == OperationStatus::waiting;
-        if (processable)
+        if (operation->arrived_preds.size() == operation->predecessors.size()
+            && machine->status == MachineStatus::waiting_material
+            && operation->status == OperationStatus::waiting)
         {
             for (auto p_id : operation->arrived_preds)
             {

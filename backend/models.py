@@ -95,6 +95,7 @@ class GenerationParamModel(BaseModel):
     min_max_speed_ratio: float
     min_process_time: float
     max_process_time: float
+    simple_mode: bool
 
 class ActionState(BaseModel):
     AGV_id: int | None = None

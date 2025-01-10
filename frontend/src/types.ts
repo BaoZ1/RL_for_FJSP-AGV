@@ -123,6 +123,7 @@ export type GenerationParams = {
   min_max_speed_ratio: number
   min_process_time: number
   max_process_time: number
+  simple_mode: boolean
 }
 
 export type PredictProgress = {
