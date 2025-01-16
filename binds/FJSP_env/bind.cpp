@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/operators.h>
 #include <pybind11/stl.h>
 
 #include "FJSP_env.h"
@@ -54,6 +55,7 @@ PYBIND11_MODULE(FJSP_env, m)
             py::init<ActionType, AGVId, MachineId, Product>(),
             "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_product"_a
         )
+        .def(py::self == py::self)
         .def_readwrite("action_type", &Action::type)
         .def_readwrite("AGV_id", &Action::act_AGV)
         .def_readwrite("target_machine", &Action::target_machine)

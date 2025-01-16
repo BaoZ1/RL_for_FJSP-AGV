@@ -82,7 +82,7 @@ function BuildFrontend {
         $moved = $false
         do {
             try {
-                Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force
+                Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force -ErrorAction Stop
                 $moved = $true
             }
             catch {

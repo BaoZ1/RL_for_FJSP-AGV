@@ -855,7 +855,12 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                 items: [
                   ...modelPaths.map((path) => ({
                     label: (
-                      <p onClick={() => setSelectedModelPath(path)}>
+                      <Flex justify="space-between"
+                        onClick={() => setSelectedModelPath(path)}
+                        css={css`
+                          min-width: 200px;
+                        `}
+                      >
                         <Typography.Text>
                           {path}
                         </Typography.Text>
@@ -863,7 +868,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                           onClick={(e) => { e.preventDefault(); removeLoadedModel(path) }}
                           icon={<CloseOutlined />}
                         />
-                      </p>
+                      </Flex>
                     ),
                     key: path
                   })),

@@ -3,6 +3,8 @@ from fastapi.responses import PlainTextResponse
 from typing import Annotated
 import uvicorn
 from pathlib import Path
+from models import *
+from FJSP_env import *
 
 
 def script_method(fn, _rcb=None):
@@ -18,18 +20,16 @@ import torch.jit
 torch.jit.script_method = script_method
 torch.jit.script = script
 
-import torch
-from FJSP_env.FJSP_env import Graph
-from models import *
-from FJSP_env import *
 from FJSP_model.modules import Agent
 
 
-app = FastAPI()
+import torch.cuda
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 models: dict[str, Agent] = {}
+
+app = FastAPI()
 
 
 def use_graph(state: Annotated[EnvState, Body()]) -> Graph:
@@ -47,10 +47,10 @@ async def get_local_env(
 ) -> EnvState:
     return EnvState.model_validate_json(path.read_text())
 
+
 @app.post("/env/save")
 async def save_local_env(
-    path: Annotated[Path, Query()],
-    graph: Annotated[Graph, Depends(use_graph)]
+    path: Annotated[Path, Query()], graph: Annotated[Graph, Depends(use_graph)]
 ):
     path.write_text(json.dumps(graph.get_state()))
 
@@ -68,6 +68,7 @@ async def get_rand_env(
     params: Annotated[GenerationParamModel, Query()],
 ) -> EnvState:
     return Graph.rand_generate(GenerateParam(**params.model_dump()))
+
 
 @app.put("/env/init")
 async def init_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
@@ -122,6 +123,7 @@ async def add_machine(
         graph.add_path(target_id, new_id)
     return graph
 
+
 @app.put("/machine/remove")
 async def remove_machine(
     graph: Annotated[Graph, Depends(use_graph)],
@@ -152,11 +154,12 @@ async def remove_path(
     graph.remove_path(a, b)
     return graph
 
+
 @app.put("/agv/add")
 async def add_agv(
     graph: Annotated[Graph, Depends(use_graph)],
     speed: Annotated[int, Query()],
-    init_pos: Annotated[int, Query()]
+    init_pos: Annotated[int, Query()],
 ) -> EnvState:
     graph.add_AGV(speed, init_pos)
     return graph
@@ -164,7 +167,7 @@ async def add_agv(
 
 @app.get("/model/list")
 async def model_list():
-    return list(models.keys())
+    return list(models.keys()) + ["useful_first", "useful_only"]
 
 
 @app.get("/model/load")
@@ -188,13 +191,30 @@ async def predict(
     sim_count: Annotated[int, Query()],
 ):
     await websocket.accept()
+    graph = use_graph(EnvState.model_validate(await websocket.receive_json()))
     try:
-        async for data in models[model_path].predict(
-            use_graph(EnvState.model_validate(await websocket.receive_json())),
-            sample_count,
-            sim_count,
-        ):
-            await websocket.send_text(PredictProgress.model_validate(data).model_dump_json(by_alias=True))
+        match model_path:
+            case "useful_first":
+                predictor = simple_predict(
+                    graph,
+                    single_step_useful_first_predict,
+                )
+            case "useful_only":
+                predictor = simple_predict(
+                    graph,
+                    single_step_useful_only_predict,
+                )
+            case _:
+                predictor = models[model_path].predict(
+                    graph,
+                    sample_count,
+                    sim_count,
+                )
+
+        async for data in predictor:
+            await websocket.send_text(
+                PredictProgress.model_validate(data).model_dump_json(by_alias=True)
+            )
 
     except WebSocketDisconnect:
         pass

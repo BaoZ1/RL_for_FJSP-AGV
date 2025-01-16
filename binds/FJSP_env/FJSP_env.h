@@ -71,6 +71,7 @@ struct Action
     Action(ActionType);
     Action(ActionType, AGVId, MachineId);
     Action(ActionType, AGVId, MachineId, Product);
+    auto operator<=>(const Action&) const = default;
     string repr() const;
 
     ActionType type;

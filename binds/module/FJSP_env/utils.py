@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Callable
 from itertools import count
 import numpy as np
+import asyncio
 
 
 @dataclass
@@ -28,7 +29,7 @@ class Observation:
         )
 
 
-def single_step_simple_predict(obs: Observation, rand_prob: float = 0):
+def single_step_useful_first_predict(obs: Observation, rand_prob: float = 0):
     useful_action_idxs = (
         [
             i
@@ -47,6 +48,45 @@ def single_step_simple_predict(obs: Observation, rand_prob: float = 0):
     act = obs.action_list[act_idx]
     return act, act_idx
 
+def single_step_useful_only_predict(obs: Observation):
+    useful_action_idxs = [
+            i
+            for i, action in enumerate(obs.action_list)
+            if action.action_type in (ActionType.pick, ActionType.transport)
+        ]
+
+    if len(useful_action_idxs) == 0:
+        i = obs.action_list.index(Action(ActionType.wait))
+        act_idx = i
+    else:
+        i = np.random.choice(len(useful_action_idxs))
+        act_idx = useful_action_idxs[i]
+    act = obs.action_list[act_idx]
+    return act, act_idx
+
+async def simple_predict(graph: Graph, rule: Callable[[Observation], tuple[Action, int]]):
+    env = Environment.from_graphs([graph])
+
+    for round_count in count(1):
+        obs = env.observe()[0]
+
+        action, _ = rule(obs)
+        env.step([action], False)
+
+        finished_step, total_step = env.envs[0].progress()
+
+        yield {
+            "round_count": round_count,
+            "finished_step": finished_step,
+            "total_step": total_step,
+            "graph_state": env.envs[0],
+            "action": action,
+        }
+
+        if env.envs[0].finished():
+            break
+
+        await asyncio.sleep(0)
 
 class Environment:
     def __init__(
@@ -95,7 +135,7 @@ class Environment:
         env = graph.init()
         for n in count(1):
             ob = Observation.from_env(env)
-            action, _ = single_step_simple_predict(ob)
+            action, _ = single_step_useful_first_predict(ob)
             env = env.act(action)
             if env.finished():
                 return True

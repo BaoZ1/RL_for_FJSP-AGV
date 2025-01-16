@@ -15,7 +15,7 @@ from FJSP_env import (
     ActionType,
     IdIdxMapper,
     Observation,
-    single_step_simple_predict,
+    single_step_useful_first_predict,
 )
 from .utils import *
 import lightning as L
@@ -1084,7 +1084,7 @@ class Agent(L.LightningModule):
                 env.reset([graph])
                 while True:
                     obs = env.observe()
-                    act, _ = single_step_simple_predict(obs[0])
+                    act, _ = single_step_useful_first_predict(obs[0])
                     _, done, _ = env.step([act])
                     if done[0]:
                         break
@@ -1100,7 +1100,7 @@ class Agent(L.LightningModule):
             acts = []
             act_idxs = []
             for ob in obs:
-                act, act_idx = single_step_simple_predict(ob)
+                act, act_idx = single_step_useful_first_predict(ob)
                 acts.append(act)
                 act_idxs.append(act_idx)
             rewards, dones, next_states = self.envs.step(acts)

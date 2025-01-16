@@ -454,6 +454,7 @@ const MachineNode: BaseFC<{
   scaleRatio: number,
   onClick: () => void,
   onDrag: (dx: number, dy: number) => void,
+  onDragFinish: () => void,
   onAddMachine: (direction: { x: number, y: number }) => void,
 }> = (props) => {
   const scaleRatioRef = useRef(props.scaleRatio)
@@ -514,6 +515,9 @@ const MachineNode: BaseFC<{
       prev_y = e.clientY
     }
     const handleMouseUp = () => {
+      setTimeout(() => {
+        props.onDragFinish()
+      }, 100);
       removeEventListener('mousemove', handleMouseMove)
       removeEventListener('mouseup', handleMouseUp)
     }
@@ -656,6 +660,7 @@ const MachineEditor: BaseFC<{
             <MachineNode key={state.id} state={state} selected={state.id === props.selected} scaleRatio={scaleRatio}
               onClick={() => props.onMachineClicked(state.id)}
               onDrag={(dx, dy) => props.onMachineDragged(state.id, dx / scaleRatio, dy / scaleRatio)}
+              onDragFinish={props.onBackgroundClicked}
               onAddMachine={(direction) => props.onAddMachine(state.id, direction)}
               css={css`
                 position: absolute;
