@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, Query, Body, Depends, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse
 from typing import Annotated
 import uvicorn
 from pathlib import Path
@@ -41,11 +41,18 @@ async def get_new_env() -> EnvState:
     return Graph()
 
 
-@app.get("/env/local")
-async def get_local_save(
+@app.get("/env/load")
+async def get_local_env(
     path: Annotated[Path, Query()],
 ) -> EnvState:
     return EnvState.model_validate_json(path.read_text())
+
+@app.post("/env/save")
+async def save_local_env(
+    path: Annotated[Path, Query()],
+    graph: Annotated[Graph, Depends(use_graph)]
+):
+    path.write_text(json.dumps(graph.get_state()))
 
 
 @app.post("/env/local")
@@ -101,6 +108,31 @@ async def remove_operation(
     return graph
 
 
+@app.put("/machine/add")
+async def add_machine(
+    graph: Annotated[Graph, Depends(use_graph)],
+    type: Annotated[int, Query()],
+    x: Annotated[float, Query()],
+    y: Annotated[float, Query()],
+    path_to: Annotated[list[int], Query()],
+) -> EnvState:
+    new_id = graph.add_machine(type, Position(x, y))
+    for target_id in path_to:
+        graph.add_path(new_id, target_id)
+        graph.add_path(target_id, new_id)
+    return graph
+
+@app.put("/machine/remove")
+async def remove_machine(
+    graph: Annotated[Graph, Depends(use_graph)],
+    id: Annotated[int, Query()],
+) -> EnvState:
+    if id == Graph.dummy_machine_id:
+        return PlainTextResponse("不可删除设备0", 400)
+    graph.remove_machine(id)
+    return graph
+
+
 @app.put("/path/add")
 async def add_path(
     graph: Annotated[Graph, Depends(use_graph)],
@@ -118,6 +150,15 @@ async def remove_path(
     b: Annotated[int, Query()],
 ) -> EnvState:
     graph.remove_path(a, b)
+    return graph
+
+@app.put("/agv/add")
+async def add_agv(
+    graph: Annotated[Graph, Depends(use_graph)],
+    speed: Annotated[int, Query()],
+    init_pos: Annotated[int, Query()]
+) -> EnvState:
+    graph.add_AGV(speed, init_pos)
     return graph
 
 
@@ -160,4 +201,4 @@ async def predict(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, reload=False)
+    uvicorn.run(app, port=8000, reload=False)

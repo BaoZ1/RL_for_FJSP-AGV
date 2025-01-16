@@ -113,6 +113,18 @@ export type AddOperationParams = {
   succ: number | null
 }
 
+export type AddMachineParams = {
+  type: number
+  x: number
+  y: number
+  pathTo: number[]
+}
+
+export type AddAGVParams = {
+  speed: number
+  init_pos: number
+}
+
 export type GenerationParams = {
   operation_count: number
   machine_count: number

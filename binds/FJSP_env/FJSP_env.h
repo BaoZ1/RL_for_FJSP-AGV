@@ -131,9 +131,11 @@ public:
     bool contains(OperationId) const;
 
     MachineId add_machine(MachineType, Position);
+    void remove_machine(MachineId);
     shared_ptr<Machine> get_machine(MachineId) const;
 
     AGVId add_AGV(float, MachineId);
+    void remove_AGV(AGVId);
     shared_ptr<AGV> get_AGV(AGVId) const;
 
     float get_timestamp() const;
@@ -175,8 +177,6 @@ public:
     void act_wait();
     shared_ptr<Graph> act(Action) const;
 
-    static tuple<vector<shared_ptr<Graph>>, vector<float>> batch_step(const vector<shared_ptr<Graph>> &, const vector<shared_ptr<Action>> &);
-
     void wait_operation();
     void wait_AGV();
 
@@ -193,8 +193,7 @@ protected:
     map<AGVId, shared_ptr<AGV>> AGVs;
 
     set<tuple<MachineId, MachineId>> direct_paths;
-    map<MachineId, map<MachineId, vector<MachineId>>> paths;
-    map<MachineId, map<MachineId, float>> distances;
+    map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> paths;
 
     ProcessingOperationQueue processing_operations;
     MovingAGVQueue moving_AGVs;

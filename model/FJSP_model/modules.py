@@ -49,14 +49,6 @@ class ResidualLinear(nn.Module):
         return self.project(x) + self.model(x)
 
 
-class Normalize(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return x / torch.norm(x, 2, dim=-1, keepdim=True)
-
-
 class ExtractLayer(nn.Module):
     def __init__(
         self,
@@ -119,13 +111,7 @@ class ExtractLayer(nn.Module):
             x_dict, edge_index_dict, edge_attr_dict
         )
 
-        for k, v in f1.items():
-            if k in res:
-                res[k] = res[k] + v
-            else:
-                res[k] = v
-
-        for k, v in f2.items():
+        for k, v in chain(f1.items(), f2.items()):
             if k in res:
                 res[k] = res[k] + v
             else:
@@ -444,26 +430,22 @@ class ActionEncoder(nn.Module):
 
 
 class ValueNet(nn.Module):
-    def __init__(self, state_channels: int):
+    def __init__(self, state_channels: int, hidden_channels: int, stack_num: int):
         super().__init__()
 
         self.model = nn.Sequential(
-            nn.Linear(state_channels, state_channels * 2),
-            nn.BatchNorm1d(state_channels * 2),
+            nn.Linear(state_channels, hidden_channels),
+            nn.BatchNorm1d(hidden_channels),
             nn.Tanh(),
-            nn.Linear(state_channels * 2, state_channels * 2),
-            nn.BatchNorm1d(state_channels * 2),
-            nn.Tanh(),
-            nn.Linear(state_channels * 2, state_channels * 2),
-            nn.BatchNorm1d(state_channels * 2),
-            nn.Tanh(),
-            nn.Linear(state_channels * 2, state_channels * 2),
-            nn.BatchNorm1d(state_channels * 2),
-            nn.Tanh(),
-            nn.Linear(state_channels * 2, state_channels * 2),
-            nn.BatchNorm1d(state_channels * 2),
-            nn.Tanh(),
-            nn.Linear(state_channels * 2, 1),
+            *[
+                nn.Sequential(
+                    nn.Linear(hidden_channels, hidden_channels),
+                    nn.BatchNorm1d(hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(stack_num)
+            ],
+            nn.Linear(hidden_channels, 1),
         )
 
     def forward(self, state: Tensor):
@@ -473,22 +455,27 @@ class ValueNet(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    def __init__(self, state_channels: int, action_channels: int):
+    def __init__(
+        self,
+        state_channels: int,
+        action_channels: int,
+        hidden_channels: int,
+        stack_num: int,
+    ):
         super().__init__()
 
         base_channels = state_channels + action_channels
         self.model = nn.Sequential(
-            nn.Linear(base_channels, base_channels * 2),
+            nn.Linear(base_channels, hidden_channels),
             nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, 1),
+            *[
+                nn.Sequential(
+                    nn.Linear(hidden_channels, hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(stack_num)
+            ],
+            nn.Linear(hidden_channels, 1),
             nn.Flatten(-2),
         )
 
@@ -503,26 +490,28 @@ class PolicyNet(nn.Module):
 
 
 class PredictNet(nn.Module):
-    def __init__(self, state_channels: int, action_channels: int):
+    def __init__(
+        self,
+        state_channels: int,
+        action_channels: int,
+        hidden_channels: int,
+        stack_num: int,
+    ):
         super().__init__()
         base_channels = state_channels + action_channels
         self.model = nn.Sequential(
-            nn.Linear(base_channels, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
+            nn.Linear(base_channels, hidden_channels),
+            nn.BatchNorm1d(hidden_channels),
             nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, state_channels),
+            *[
+                nn.Sequential(
+                    nn.Linear(hidden_channels, hidden_channels),
+                    nn.BatchNorm1d(hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(stack_num)
+            ],
+            nn.Linear(hidden_channels, state_channels),
         )
 
     def forward(self, state: Tensor, action: Tensor):
@@ -570,7 +559,19 @@ class ValuePrefixNet(nn.Module):
 
 
 class ActionGenerator(nn.Module):
-    def __init__(self, state_channels: int, action_channels: int, out_num: int):
+    def __init__(
+        self,
+        state_channels: int,
+        action_channels: int,
+        out_num: int,
+        gen_hidden_channels: int,
+        gen_stack_num: int,
+        dis_hidden_channels: int,
+        dis_stack_num: int,
+        cls_emb_dim: int,
+        cls_hidden_channels: int,
+        cls_stack_num: int,
+    ):
         super().__init__()
 
         self.action_channels = action_channels
@@ -578,52 +579,53 @@ class ActionGenerator(nn.Module):
 
         base_channels = state_channels + action_channels
 
-        embedding_dim = 8
-
-        self.embeddings = nn.Embedding(out_num, embedding_dim)
+        self.embeddings = nn.Embedding(out_num, cls_emb_dim)
 
         self.generator = nn.Sequential(
-            nn.Linear(state_channels + embedding_dim, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
+            nn.Linear(state_channels + cls_emb_dim, gen_hidden_channels),
+            nn.BatchNorm1d(gen_hidden_channels),
             nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels * 2),
-            nn.BatchNorm1d(base_channels * 2),
-            nn.Tanh(),
-            nn.Linear(base_channels * 2, base_channels),
-            nn.BatchNorm1d(base_channels),
-            nn.Tanh(),
-            nn.Linear(base_channels, action_channels),
+            *[
+                nn.Sequential(
+                    nn.Linear(gen_hidden_channels, gen_hidden_channels),
+                    nn.BatchNorm1d(gen_hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(gen_stack_num)
+            ],
+            nn.Linear(gen_hidden_channels, action_channels),
         )
 
         self.discriminator = nn.Sequential(
-            nn.Linear(base_channels, action_channels * 2),
-            nn.BatchNorm1d(action_channels * 2),
+            nn.Linear(base_channels, dis_hidden_channels),
+            nn.BatchNorm1d(dis_hidden_channels),
             nn.Tanh(),
-            nn.Linear(action_channels * 2, action_channels * 2),
-            nn.BatchNorm1d(action_channels * 2),
-            nn.Tanh(),
-            nn.Linear(action_channels * 2, action_channels),
-            nn.BatchNorm1d(action_channels),
-            nn.Tanh(),
-            nn.Linear(action_channels, 1),
+            *[
+                nn.Sequential(
+                    nn.Linear(dis_hidden_channels, dis_hidden_channels),
+                    nn.BatchNorm1d(dis_hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(dis_stack_num)
+            ],
+            nn.Linear(dis_hidden_channels, 1),
             nn.Sigmoid(),
             nn.Flatten(-2),
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(base_channels, action_channels * 2),
-            nn.BatchNorm1d(action_channels * 2),
+            nn.Linear(base_channels, cls_hidden_channels),
+            nn.BatchNorm1d(cls_hidden_channels),
             nn.Tanh(),
-            nn.Linear(action_channels * 2, action_channels * 2),
-            nn.BatchNorm1d(action_channels * 2),
-            nn.Tanh(),
-            nn.Linear(action_channels * 2, action_channels),
-            nn.BatchNorm1d(action_channels),
-            nn.Tanh(),
-            nn.Linear(action_channels, out_num),
+            *[
+                nn.Sequential(
+                    nn.Linear(cls_hidden_channels, cls_hidden_channels),
+                    nn.BatchNorm1d(cls_hidden_channels),
+                    nn.Tanh(),
+                )
+                for _ in range(cls_stack_num)
+            ],
+            nn.Linear(cls_hidden_channels, out_num),
         )
 
         self.eval_generator = nn.Sequential(
@@ -956,17 +958,32 @@ class Agent(L.LightningModule):
         self,
         envs: Environment | None,
         lr: float,
+        opt_step_size: int,
         seq_len: int,
         buffer_size: int,
         epoch_size: int,
         batch_size: int,
-        val_num: int,
         node_channels: tuple[int, int, int],
         type_channels: tuple[int, int, int],
         graph_channels: int,
         state_layer_num: int,
         action_channels: int,
+        value_hidden_channel: int,
+        value_stack_num: int,
+        policy_hidden_channel: int,
+        policy_stack_num: int,
+        predict_hidden_channel: int,
+        predict_stack_num: int,
+        prefix_hidden_channel: int,
+        prefix_stack_num: int,
         generate_count: int,
+        gen_hidden_channels: int,
+        gen_stack_num: int,
+        dis_hidden_channels: int,
+        dis_stack_num: int,
+        cls_emb_dim: int,
+        cls_hidden_channels: int,
+        cls_stack_num: int,
         root_sample_count: int,
         simulation_count: int,
         val_predict_num: int,
@@ -978,12 +995,12 @@ class Agent(L.LightningModule):
         self.envs = envs
 
         self.lr = lr
+        self.opt_step_size = opt_step_size
 
         self.seq_len = seq_len
 
         self.epoch_size = epoch_size
         self.batch_size = batch_size
-        self.val_num = val_num
 
         self.extractor = StateExtract(
             node_channels,
@@ -992,14 +1009,37 @@ class Agent(L.LightningModule):
             state_layer_num,
         )
         self.action_encoder = ActionEncoder(action_channels, node_channels)
-        self.value_net = ValueNet(graph_channels)
-        self.policy_net = PolicyNet(graph_channels, action_channels)
-        self.predictor = PredictNet(graph_channels, action_channels)
-        self.value_prefix_net = ValuePrefixNet(graph_channels, 512, 3)
+        self.value_net = ValueNet(
+            graph_channels,
+            value_hidden_channel,
+            value_stack_num,
+        )
+        self.policy_net = PolicyNet(
+            graph_channels,
+            action_channels,
+            policy_hidden_channel,
+            policy_stack_num,
+        )
+        self.predictor = PredictNet(
+            graph_channels,
+            action_channels,
+            predict_hidden_channel,
+            predict_stack_num,
+        )
+        self.value_prefix_net = ValuePrefixNet(
+            graph_channels, prefix_hidden_channel, prefix_stack_num
+        )
         self.action_generator = ActionGenerator(
             graph_channels,
             action_channels,
             generate_count,
+            gen_hidden_channels,
+            gen_stack_num,
+            dis_hidden_channels,
+            dis_stack_num,
+            cls_emb_dim,
+            cls_hidden_channels,
+            cls_stack_num,
         )
 
         self.mcts = MCTS(
@@ -1027,33 +1067,28 @@ class Agent(L.LightningModule):
 
     def prepare_data(self):
         assert self.envs is not None
-        self.baseline, self.val_graphs = self.get_baseline(self.val_num)
+        self.baseline, self.val_graphs = self.get_baseline()
         self.init_buffer()
 
-    def get_baseline(self, env_count) -> tuple[np.ndarray, list[Graph]]:
+    def get_baseline(self) -> tuple[np.ndarray, list[Graph]]:
         temp_envs = [
-            Environment(1, self.envs.generate_params, False) for _ in range(env_count)
+            Environment(1, [params], False) for params in self.envs.generate_params
         ]
         timestamps: list[float] = []
         graphs: list[Graph] = []
         for env_i, env in enumerate(temp_envs):
             env_timestamps: list[float] = []
-            while True:
-                env_timestamps.clear()
-                env.reset()
-                graph = env.envs[0]
-                for _ in tqdm(range(8), f"Baseline_{env_i}", leave=False):
-                    env.reset([graph])
-                    while True:
-                        obs = env.observe()
-                        act, _ = single_step_simple_predict(obs[0])
-                        _, done, _ = env.step([act])
-                        if done[0]:
-                            break
-
-                    env_timestamps.append(env.envs[0].get_timestamp())
-                if len(env_timestamps) > 5:
-                    break
+            env.reset()
+            graph = env.envs[0]
+            for _ in tqdm(range(self.val_predict_num), f"Baseline_{env_i}", leave=False):
+                env.reset([graph])
+                while True:
+                    obs = env.observe()
+                    act, _ = single_step_simple_predict(obs[0])
+                    _, done, _ = env.step([act])
+                    if done[0]:
+                        break
+                env_timestamps.append(env.envs[0].get_timestamp())
             timestamps.append(np.mean(env_timestamps))
             graphs.append(graph)
         return timestamps, graphs
@@ -1091,15 +1126,27 @@ class Agent(L.LightningModule):
             ),
             self.lr,
         )
-        encode_predict_sch = lr_scheduler.StepLR(encode_predict_opt, 5, 0.5)
+        encode_predict_sch = lr_scheduler.StepLR(
+            encode_predict_opt,
+            self.opt_step_size,
+            0.9,
+        )
 
-        value_prefix_opt = optim.Adam(self.value_prefix_net.parameters(), self.lr)
-        value_prefix_sch = lr_scheduler.StepLR(value_prefix_opt, 5, 0.8)
+        value_prefix_opt = optim.SGD(self.value_prefix_net.parameters(), self.lr)
+        value_prefix_sch = lr_scheduler.StepLR(
+            value_prefix_opt,
+            self.opt_step_size,
+            0.9,
+        )
 
         discriminator_opt = optim.Adam(
             self.action_generator.discriminator.parameters(), self.lr
         )
-        discriminator_sch = lr_scheduler.StepLR(discriminator_opt, 5, 0.8)
+        discriminator_sch = lr_scheduler.StepLR(
+            discriminator_opt,
+            self.opt_step_size,
+            0.9,
+        )
 
         generator_opt = optim.Adam(
             chain(
@@ -1108,16 +1155,24 @@ class Agent(L.LightningModule):
             ),
             self.lr,
         )
-        generator_sch = lr_scheduler.StepLR(generator_opt, 5, 0.8)
+        generator_sch = lr_scheduler.StepLR(
+            generator_opt,
+            self.opt_step_size,
+            0.9,
+        )
 
-        actor_critic_opt = optim.SGD(
+        actor_critic_opt = optim.Adam(
             chain(
                 self.value_net.parameters(),
                 self.policy_net.parameters(),
             ),
             self.lr,
         )
-        actor_critic_sch = lr_scheduler.StepLR(actor_critic_opt, 5, 0.8)
+        actor_critic_sch = lr_scheduler.StepLR(
+            actor_critic_opt,
+            self.opt_step_size,
+            0.9,
+        )
 
         return [
             encode_predict_opt,
@@ -1143,7 +1198,7 @@ class Agent(L.LightningModule):
     def val_dataloader(self):
         return DataLoader(
             self.val_graphs,
-            self.val_num,
+            len(self.val_graphs),
             collate_fn=lambda batch: batch,
         )
 

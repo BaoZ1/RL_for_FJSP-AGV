@@ -138,8 +138,6 @@ Graph::Graph() : inited(false),
     this->add_relation(this->begin_operation_id, this->end_operation_id);
 
     this->machines[this->dummy_machine_id] = make_shared<Machine>(this->dummy_machine_id, this->dummy_machine_type, Position{0, 0});
-    auto &&dummy_path_row = this->paths.emplace(this->dummy_machine_id, map<MachineId, vector<MachineId>>()).first->second;
-    dummy_path_row.emplace(this->dummy_machine_id, vector<MachineId>{this->dummy_machine_id});
 
     this->next_operation_id = 1;
     this->next_machine_id = 1;
@@ -169,7 +167,6 @@ Graph::Graph(const Graph &other) : processing_operations(ProcessingOperationQueu
 
     this->direct_paths = other.direct_paths;
     this->paths = other.paths;
-    this->distances = other.distances;
 
     this->inited = other.inited;
     this->timestamp = other.timestamp;
@@ -546,17 +543,26 @@ MachineId Graph::add_machine(MachineType type, Position pos)
 {
     auto node = make_shared<Machine>(this->next_machine_id++, type, pos);
     this->machines[node->id] = node;
-    for (auto prev : this->paths | views::values)
-    {
-        prev.emplace(node->id, vector<MachineId>{});
-    }
-    auto &new_row = this->paths[node->id];
-    for (auto id : this->machines | views::keys)
-    {
-        new_row.emplace(id, vector<MachineId>{});
-    }
-    new_row.at(node->id).emplace_back(node->id);
+    this->paths.clear();
     return node->id;
+}
+
+void Graph::remove_machine(MachineId id)
+{
+    auto machine = this->machines[id];
+    this->machines.erase(id);
+    for (auto it = this->direct_paths.begin(); it != this->direct_paths.end();)
+    {
+        if (get<0>(*it) == id || get<1>(*it) == id)
+        {
+            it = this->direct_paths.erase(it);
+        }
+        else
+        {
+            it++;
+        }
+    }
+    this->paths.clear();
 }
 
 shared_ptr<Machine> Graph::get_machine(MachineId id) const
@@ -570,6 +576,11 @@ AGVId Graph::add_AGV(float speed, MachineId init_pos)
     this->AGVs[new_AGV->id] = new_AGV;
 
     return new_AGV->id;
+}
+
+void Graph::remove_AGV(AGVId id)
+{
+    this->AGVs.erase(id);
 }
 
 shared_ptr<AGV> Graph::get_AGV(AGVId id) const
@@ -611,7 +622,7 @@ string Graph::repr() const
     }
 
     ss << format("\n distance: \n");
-    if (this->distances.empty())
+    if (this->paths.empty())
     {
         ss << add_indent("not calculated");
     }
@@ -627,7 +638,7 @@ string Graph::repr() const
             ss << format("\n{:^6}", from);
             for (auto &&[to, _] : this->machines)
             {
-                ss << format("{:^6.2f}", this->distances.at(from).at(to));
+                ss << format("{:^6.2f}", get<1>(this->paths.at(from).at(to)));
             }
         }
     }
@@ -637,44 +648,38 @@ string Graph::repr() const
 
 void Graph::add_path(MachineId a, MachineId b)
 {
-    this->distances.clear();
     this->direct_paths.emplace(a, b);
     this->direct_paths.emplace(b, a);
+    this->paths.clear();
 }
 
 void Graph::remove_path(MachineId a, MachineId b)
 {
-    this->distances.clear();
     this->direct_paths.erase({a, b});
     this->direct_paths.erase({b, a});
+    this->paths.clear();
 }
 
 void Graph::calc_distance()
 {
-    this->distances.clear();
+    this->paths.clear();
     for (auto f_id : this->machines | views::keys)
     {
         for (auto t_id : this->machines | views::keys)
         {
             if (f_id == t_id)
             {
-                this->distances[f_id][t_id] = 0;
+                this->paths[f_id][t_id] = {{t_id}, 0};
             }
             else if (this->direct_paths.contains({f_id, t_id}))
             {
-                this->distances[f_id][t_id] = this->machines.at(f_id)->pos.distance(this->machines.at(t_id)->pos);
+                this->paths[f_id][t_id] = {{t_id}, this->machines.at(f_id)->pos.distance(this->machines.at(t_id)->pos)};
             }
             else
             {
-                this->distances[f_id][t_id] = numeric_limits<float>::infinity() / 3;
+                this->paths[f_id][t_id] = {{}, numeric_limits<float>::infinity()};
             }
         }
-    }
-
-    this->paths.clear();
-    for (auto [f_id, t_id] : this->direct_paths)
-    {
-        this->paths[f_id][t_id].emplace_back(t_id);
     }
 
     for (auto m_id : this->machines | views::keys)
@@ -683,41 +688,52 @@ void Graph::calc_distance()
         {
             for (auto t_id : this->machines | views::keys)
             {
-                if (this->paths[f_id][m_id].empty() || this->paths[m_id][t_id].empty())
+                auto &[first_path, first_dist] = this->paths.at(f_id).at(m_id);
+                auto &[second_path, second_dist] = this->paths.at(m_id).at(t_id);
+                if (first_path.empty() || second_path.empty())
                 {
                     continue;
                 }
-                float dist = this->distances[f_id][m_id] + this->distances[m_id][t_id];
-                if (this->distances[f_id][t_id] > dist)
+                float total_dist = first_dist + second_dist;
+                auto &[path, dist] = this->paths.at(f_id).at(t_id);
+                if (dist > total_dist)
                 {
-                    this->distances[f_id][t_id] = dist;
-                    auto &&path = this->paths[f_id][t_id];
                     path.clear();
-                    path.append_range(this->paths[f_id][m_id]);
-                    path.append_range(this->paths[m_id][t_id]);
+                    path.append_range(first_path);
+                    path.append_range(second_path);
+                    dist = total_dist;
                 }
             }
         }
     }
+
+    assert(
+        ranges::all_of(
+            this->paths | views::values,
+            [](auto item)
+            {
+                return ranges::all_of(
+                    item | views::values | views::elements<1>,
+                    [](float dist)
+                    {
+                        return dist != numeric_limits<float>::infinity();
+                    }
+                );
+            }
+        )
+    );
 }
 
 map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> Graph::get_paths()
 {
-    assert(!this->distances.empty() && !this->paths.empty());
-    map<MachineId, map<MachineId, tuple<vector<MachineId>, float>>> ret;
-    for (auto f_id : this->machines | views::keys)
-    {
-        for (auto t_id : this->machines | views::keys)
-        {
-            ret[f_id][t_id] = make_tuple(this->paths.at(f_id).at(t_id), this->distances.at(f_id).at(t_id));
-        }
-    }
-    return ret;
+    assert(!this->paths.empty());
+    return this->paths;
 }
 
 float Graph::get_travel_time(MachineId from, MachineId to, AGVId agv) const
 {
-    return this->distances.at(from).at(to) / this->AGVs.at(agv)->speed;
+    assert(!this->paths.empty());
+    return get<1>(this->paths.at(from).at(to)) / this->AGVs.at(agv)->speed;
 }
 
 shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
@@ -767,10 +783,11 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     float min_dist = numeric_limits<float>::max();
     float max_dist = numeric_limits<float>::min();
 
-    for (auto [f_id, tos] : ret->distances)
+    for (auto [f_id, tos] : ret->paths)
     {
-        for (auto [t_id, dist] : tos)
+        for (auto [t_id, data] : tos)
         {
+            auto [path, dist] = data;
             if (t_id == f_id)
             {
                 continue;
@@ -1088,7 +1105,7 @@ float Graph::finish_time_lower_bound() const
             {
                 continue;
             }
-            float distance = this->distances.at(fid).at(tid);
+            float distance = get<1>(this->paths.at(fid).at(tid));
             auto [iter, new_add] = min_type_distance.try_emplace({from->type, to->type}, distance);
             if (!new_add)
             {
@@ -1230,7 +1247,7 @@ void Graph::act_move(AGVId id, MachineId target)
     assert(AGV->status == AGVStatus::idle);
     AGV->target_machine = target;
     AGV->status = AGVStatus::moving;
-    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->get_travel_time(AGV->position, target, id);
     this->moving_AGVs.push(id);
 }
 
@@ -1247,7 +1264,7 @@ void Graph::act_pick(AGVId id, MachineId target, Product product)
     AGV->target_machine = target;
     AGV->target_item = product;
     AGV->status = AGVStatus::picking;
-    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->get_travel_time(AGV->position, target, id);
     this->moving_AGVs.push(id);
 }
 
@@ -1299,7 +1316,7 @@ void Graph::act_transport(AGVId id, MachineId target)
 
     AGV->target_machine = target;
     AGV->status = AGVStatus::transporting;
-    AGV->finish_timestamp = this->timestamp + this->distances.at(AGV->position).at(target) / AGV->speed;
+    AGV->finish_timestamp = this->timestamp + this->get_travel_time(AGV->position, target, id);
 
     this->moving_AGVs.push(id);
 }
@@ -1329,6 +1346,7 @@ void Graph::act_wait()
     }
     else
     {
+        DEBUG_OUT("{}", this->repr());
         assert(false);
     }
 }
@@ -1359,21 +1377,6 @@ shared_ptr<Graph> Graph::act(Action action) const
         assert(false);
     }
     return ret;
-}
-
-tuple<vector<shared_ptr<Graph>>, vector<float>> Graph::batch_step(const vector<shared_ptr<Graph>> &envs, const vector<shared_ptr<Action>> &actions)
-{
-    auto pairs = views::zip(vector(envs), vector<float>(envs.size(), 0), actions) | ranges::to<vector>();
-
-    for_each(execution::par, pairs.begin(), pairs.end(), [](tuple<shared_ptr<Graph>, float, shared_ptr<Action>> &item)
-             {
-                 auto &[env, lb, action] = item;
-                 env = env->act(*action);
-                 lb = env->finish_time_lower_bound(); });
-    return make_tuple(
-        pairs | views::elements<0> | ranges::to<vector>(),
-        pairs | views::elements<1> | ranges::to<vector>()
-    );
 }
 
 void Graph::wait_operation()

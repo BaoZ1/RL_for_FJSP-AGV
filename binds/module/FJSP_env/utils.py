@@ -93,7 +93,7 @@ class Environment:
 
     def test(self, graph: Graph):
         env = graph.init()
-        while True:
+        for n in count(1):
             ob = Observation.from_env(env)
             action, _ = single_step_simple_predict(ob)
             env = env.act(action)
@@ -127,9 +127,9 @@ class Environment:
             reward = 0
             action = actions[action_idx]
             if action.action_type in (ActionType.pick, ActionType.transport):
-                reward += 2
+                reward += 0.2
             elif action.action_type == ActionType.move:
-                reward += -0.5
+                reward += -0.05
             new_env = env.act(action)
             if (
                 auto_wait
@@ -144,7 +144,7 @@ class Environment:
             reward += -d_lb
             if new_env.finished():
                 done = True
-                reward = 100
+                reward = 1
             else:
                 done = False
             rewards.append(reward)

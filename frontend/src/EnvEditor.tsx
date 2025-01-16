@@ -2,22 +2,22 @@
 
 import { useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
 import {
-  Splitter, Button, Layout, Card, Empty, Flex, Modal,
-  Form, InputNumber, Space, FormInstance, FloatButton, Select,
-  Checkbox,
+  Splitter, Button, Layout, Card, Empty, Flex, Modal, Form,
+  InputNumber, Space, FormInstance, FloatButton, Select, Checkbox, message,
 } from "antd"
-import { open } from "@tauri-apps/plugin-dialog"
+import { open, save } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
-import {
-  useFloating, useClientPoint, useInteractions,
-  useHover, offset, safePolygon, arrow
-} from '@floating-ui/react';
+import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon, arrow } from '@floating-ui/react';
 import {
   RedoOutlined, CaretRightFilled, AimOutlined,
   PlusCircleOutlined, CloseCircleOutlined, PlusOutlined
 } from '@ant-design/icons';
-import { BaseFC, OperationState, EnvState, GenerationParams, AGVState, MachineState, AddOperationParams } from "./types";
-import { addOperation, addPath, loadEnv, newEnv, randEnv, removeOperation } from "./backend-api";
+import {
+  BaseFC, OperationState, EnvState, GenerationParams,
+  AGVState, MachineState, AddOperationParams, AddAGVParams,
+  AddMachineParams
+} from "./types";
+import { addAGV, addMachine, addOperation, addPath, loadEnv, newEnv, randEnv, removeMachine, removeOperation, saveEnv } from "./backend-api";
 
 const OperationNode: BaseFC<{
   operation: { id: number, x: number, y: number },
@@ -27,12 +27,14 @@ const OperationNode: BaseFC<{
   onAddSuccClick: () => void,
   onRemoveClick: () => void,
   radius: number,
-  scaleRate: number
+  scaleRatio: number
 }> = (props) => {
+  const [messageApi, contextHolder] = message.useMessage();
+
   const type = ({ 0: "start", 9999: "end" } as const)[props.operation.id] || "normal"
 
-  const scaleRateRef = useRef(props.scaleRate)
-  useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
+  const scaleRatioRef = useRef(props.scaleRatio)
+  useEffect(() => { scaleRatioRef.current = props.scaleRatio }, [props.scaleRatio])
 
   const [reference, setReference] = useState<HTMLElement | null>(null)
 
@@ -51,11 +53,11 @@ const OperationNode: BaseFC<{
       const placement_offset_y = -height / 2
       const raw_offset_x = x - placement_offset_x
       const raw_offset_y = y - placement_offset_y
-      const scaled_offset_offset = 5 / scaleRateRef.current
+      const scaled_offset_offset = 5 / scaleRatioRef.current
 
       return {
-        mainAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current + scaled_offset_offset,
-        crossAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current
+        mainAxis: -raw_offset_x + raw_offset_x / scaleRatioRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_y + raw_offset_y / scaleRatioRef.current
       }
     })]
   });
@@ -77,11 +79,11 @@ const OperationNode: BaseFC<{
       const placement_offset_y = -height / 2
       const raw_offset_x = -x - placement_offset_x
       const raw_offset_y = y - placement_offset_y
-      const scaled_offset_offset = 5 / scaleRateRef.current
+      const scaled_offset_offset = 5 / scaleRatioRef.current
 
       return {
-        mainAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current + scaled_offset_offset,
-        crossAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current
+        mainAxis: -raw_offset_x + raw_offset_x / scaleRatioRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_y + raw_offset_y / scaleRatioRef.current
       }
     })]
   });
@@ -103,11 +105,11 @@ const OperationNode: BaseFC<{
       const placement_offset_y = 0
       const raw_offset_x = x - placement_offset_x
       const raw_offset_y = y - placement_offset_y
-      const scaled_offset_offset = 5 / scaleRateRef.current
+      const scaled_offset_offset = 5 / scaleRatioRef.current
 
       return {
-        mainAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current + scaled_offset_offset,
-        crossAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current
+        mainAxis: -raw_offset_y + raw_offset_y / scaleRatioRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_x + raw_offset_x / scaleRatioRef.current
       }
     })]
   });
@@ -118,6 +120,7 @@ const OperationNode: BaseFC<{
 
   return (
     <>
+      {contextHolder}
       <div className={props.className} ref={setReference} {...getReferenceProps()}
         onClick={(e) => {
           e.stopPropagation()
@@ -212,11 +215,11 @@ const OperationLine: BaseFC<{
   p: { id: number, x: number, y: number },
   s: { id: number, x: number, y: number },
   nodeRadius: number,
-  scaleRate: number
+  scaleRatio: number
 }> = (props) => {
   const [isOpen, setIsOpen] = useState(false);
-  const scaleRateRef = useRef(props.scaleRate)
-  useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
+  const scaleRatioRef = useRef(props.scaleRatio)
+  useEffect(() => { scaleRatioRef.current = props.scaleRatio }, [props.scaleRatio])
   const { refs, floatingStyles, context } = useFloating({
     placement: "top",
     open: isOpen,
@@ -226,11 +229,11 @@ const OperationLine: BaseFC<{
       const top_offset_y = height
       const raw_offset_x = x - top_offset_x
       const raw_offset_y = -y - top_offset_y
-      const scaled_offset_offset = 10 / scaleRateRef.current
+      const scaled_offset_offset = 10 / scaleRatioRef.current
 
       return {
-        mainAxis: -raw_offset_y + raw_offset_y / scaleRateRef.current + scaled_offset_offset,
-        crossAxis: -raw_offset_x + raw_offset_x / scaleRateRef.current
+        mainAxis: -raw_offset_y + raw_offset_y / scaleRatioRef.current + scaled_offset_offset,
+        crossAxis: -raw_offset_x + raw_offset_x / scaleRatioRef.current
       }
     })]
   });
@@ -395,12 +398,12 @@ const OperationEditor: BaseFC<{
       props.states.find((item) => item.id === s.id)!.predecessors.map((pred_id) => (
         operationPosList.find((item) => item.id === pred_id)!
       )).map((p) => (
-        <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRate={scaleRatio} />
+        <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRatio={scaleRatio} />
       ))
     )),
     operationPosList.map((operation) => (
       <OperationNode key={operation.id} operation={operation} selected={operation.id === props.selectedOperation}
-        radius={nodeRadius} scaleRate={scaleRatio}
+        radius={nodeRadius} scaleRatio={scaleRatio}
         onClick={() => props.onOperationClick(operation.id)}
         onAddPredClick={() => props.onAddOperation(null, operation.id)}
         onAddSuccClick={() => props.onAddOperation(operation.id, null)}
@@ -448,9 +451,53 @@ const OperationEditor: BaseFC<{
 const MachineNode: BaseFC<{
   state: MachineState,
   selected: boolean,
+  scaleRatio: number,
   onClick: () => void,
-  onDrag: (dx: number, dy: number) => void
+  onDrag: (dx: number, dy: number) => void,
+  onAddMachine: (direction: { x: number, y: number }) => void,
 }> = (props) => {
+  const scaleRatioRef = useRef(props.scaleRatio)
+  useEffect(() => { scaleRatioRef.current = props.scaleRatio }, [props.scaleRatio])
+
+  const [addMachineBtnDirection, setAddMachineBtnDirection] = useState<{ x: number, y: number }>({ x: 1, y: 0 })
+
+  const [reference, setReference] = useState<HTMLElement | null>(null)
+
+  const [isAddMachineOpen, setIsAddMachineOpen] = useState(false);
+  const {
+    refs: addMachineRefs,
+    floatingStyles: addMachineFloatingStyles,
+    context: addMachineContext
+  } = useFloating({
+    placement: "bottom",
+    open: isAddMachineOpen,
+    onOpenChange: setIsAddMachineOpen,
+    elements: { reference },
+    middleware: [offset(({ rects }) => {
+      const centerX = 0
+      const centerY = -rects.reference.height / 2 - rects.floating.height / 2
+      return {
+        mainAxis: centerY + addMachineBtnDirection.y * 40,
+        crossAxis: centerX + addMachineBtnDirection.x * 40
+      };
+    }, [addMachineBtnDirection])]
+    // middleware: [offset(({ x, y, rects: { floating: { height } } }) => {
+    //   const placement_offset_x = 0
+    //   const placement_offset_y = -height / 2
+    //   const raw_offset_x = x - placement_offset_x
+    //   const raw_offset_y = y - placement_offset_y
+    //   const scaled_offset_offset = 5 / scaleRatioRef.current
+
+    //   return {
+    //     mainAxis: -raw_offset_x + raw_offset_x / scaleRatioRef.current + scaled_offset_offset,
+    //     crossAxis: -raw_offset_y + raw_offset_y / scaleRatioRef.current
+    //   }
+    // })]
+  });
+  const addMachineHover = useHover(addMachineContext, { handleClose: safePolygon() });
+  const { getFloatingProps: getAddMachineFloatingProps } = useInteractions([addMachineHover]);
+
+  const { getReferenceProps } = useInteractions([addMachineHover])
 
   const trackDrag = (e: MouseEvent) => {
     e.preventDefault()
@@ -475,28 +522,60 @@ const MachineNode: BaseFC<{
   }
 
   return (
-    <div className={props.className} onMouseDown={trackDrag}
-      onClick={(e) => {
-        e.stopPropagation()
-        props.onClick()
-      }}
-      css={css`
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
-        background-color: gray;
-        border: 2px solid ${props.selected ? "red" : "black"};
-        display: flex;
-        justify-content: center;
-        align-items: center;
+    <>
+      <div className={props.className} ref={setReference} {...getReferenceProps()}
+        onMouseDown={trackDrag}
+        onMouseMove={(e) => {
+          const selfRect = reference!.getBoundingClientRect()
+          const dx = e.clientX - (selfRect.x + selfRect.width / 2)
+          const dy = e.clientY - (selfRect.y + selfRect.height / 2)
+          const len = Math.hypot(dx, dy)
+          setAddMachineBtnDirection({ x: dx / len, y: dy / len })
+        }}
+        onClick={(e) => {
+          e.stopPropagation()
+          props.onClick()
+        }}
+        css={css`
+          width: 50px;
+          height: 50px;
+          border-radius: 50%;
+          background-color: gray;
+          border: 2px solid ${props.selected ? "red" : "black"};
+          display: flex;
+          justify-content: center;
+          align-items: center;
 
-        &:hover {
-          border-color: red;
-        }
+          &:hover {
+            border-color: red;
+          }
       `}
-    >
-      {props.state.id}
-    </div>
+      >
+        {props.state.id}
+      </div>
+      {
+        isAddMachineOpen && (
+          <PlusCircleOutlined ref={addMachineRefs.setFloating} {...getAddMachineFloatingProps()}
+            style={addMachineFloatingStyles}
+            onClick={() => props.onAddMachine(addMachineBtnDirection)}
+            css={css`
+              font-size: 25px;
+              position: absolute;
+              top: 50%;
+              left: 50%;
+              transform: translate(-50%, -50%);
+              background-color: white;
+              border-radius: 50%;
+              color: #888888;
+
+              :hover {
+                color: black;
+              }
+            `}
+          />
+        )
+      }
+    </>
   )
 }
 
@@ -516,7 +595,8 @@ const MachineEditor: BaseFC<{
   selected: number | null,
   onBackgroundClicked: () => void,
   onMachineClicked: (id: number) => void,
-  onMachineDragged: (id: number, dx: number, dy: number) => void
+  onMachineDragged: (id: number, dx: number, dy: number) => void,
+  onAddMachine: (relativeId: number, direction: { x: number, y: number }) => void
 }> = (props) => {
   const [scaleRatio, setScaleRatio] = useState<number>(5)
   const [offset, setOffset] = useState<{ x: number, y: number }>({ x: 0, y: 0 })
@@ -573,9 +653,10 @@ const MachineEditor: BaseFC<{
       `}>
         {
           props.states.map((state) => (
-            <MachineNode key={state.id} state={state} selected={state.id === props.selected}
+            <MachineNode key={state.id} state={state} selected={state.id === props.selected} scaleRatio={scaleRatio}
               onClick={() => props.onMachineClicked(state.id)}
               onDrag={(dx, dy) => props.onMachineDragged(state.id, dx / scaleRatio, dy / scaleRatio)}
+              onAddMachine={(direction) => props.onAddMachine(state.id, direction)}
               css={css`
                 position: absolute;
                 bottom: ${state.pos.y * scaleRatio}px;
@@ -614,7 +695,7 @@ const MachineEditor: BaseFC<{
   )
 }
 
-const AGVNode: BaseFC<{ state: AGVState }> = (props) => {
+const AGVNode: BaseFC<{ state: AGVState, onRemoveClick: () => void }> = (props) => {
   const [reference, setReference] = useState<HTMLElement | null>(null)
   const arrowRef = useRef(null)
 
@@ -684,7 +765,7 @@ const AGVNode: BaseFC<{ state: AGVState }> = (props) => {
       }
       {
         isRemoveOpen && (
-          <CloseCircleOutlined css={css`
+          <CloseCircleOutlined onClick={props.onRemoveClick} css={css`
             font-size: 25px;
             position: absolute;
             top: 50%;
@@ -709,10 +790,10 @@ const AGVNode: BaseFC<{ state: AGVState }> = (props) => {
 const AddOperationConfigForm: BaseFC<{
   formData: FormInstance<AddOperationParams>,
   onFinish: () => void,
-  machines?: MachineState[]
+  machines: MachineState[]
 }> = (props) => {
   const typeMap = new Map<number, number[]>()
-  props.machines?.forEach((machine) => {
+  props.machines.forEach((machine) => {
     typeMap.set(machine.type, [...(typeMap.get(machine.type) || []), machine.id])
   })
 
@@ -787,6 +868,79 @@ const AddOperationConfigForm: BaseFC<{
   )
 }
 
+const AddMachineConfigForm: BaseFC<{
+  formData: FormInstance<AddMachineParams>,
+  onFinish: (values: AddMachineParams) => void,
+  machines: MachineState[]
+}> = (props) => {
+  const new_type = props.machines.reduce((p, m) => Math.max(p, m.type) + 1, 0)
+
+  const pos = [
+    (props.formData.getFieldValue('x') as number).toFixed(2),
+    (props.formData.getFieldValue('y') as number).toFixed(2)
+  ]
+
+  return (
+    <Form className={props.className} form={props.formData} onFinish={props.onFinish}
+      initialValues={{
+        type: new_type
+      }}
+    >
+      <Form.Item<AddMachineParams> label="坐标">
+        {`( ${pos[0]}, ${pos[1]} )`}
+      </Form.Item>
+      <Form.Item<AddMachineParams> name="type" label="设备类型">
+        <Select options={props.machines.map((m) => m.type)
+          .filter((v, i, a) => a.indexOf(v) === i)
+          .map((v) => ({
+            label: `${v}`,
+            value: v
+          })).concat({ label: "新增", value: new_type })} />
+      </Form.Item>
+      <Form.Item<AddMachineParams> name="pathTo" label="连接设备">
+        <Select mode="multiple" options={props.machines.map((m) => ({
+          label: m.id,
+          value: m.id
+        }))} />
+      </Form.Item>
+      <Form.Item>
+        <Button type="primary" htmlType="submit">确定</Button>
+      </Form.Item>
+    </Form>
+  )
+}
+
+const AddAGVConfigForm: BaseFC<{
+  formData: FormInstance<AddAGVParams>,
+  onFinish: (values: AddAGVParams) => void,
+  machines: MachineState[]
+}> = (props) => {
+  return (
+    <Form className={props.className} form={props.formData} onFinish={props.onFinish}
+      initialValues={{
+        init_pos: 0,
+        speed: 10
+      }}
+    >
+      <Form.Item<AddAGVParams> name="init_pos" label="初始位置">
+        <Select options={props.machines?.map((m) => (
+          {
+            label: `${m.id}`,
+            value: m.id
+          }
+        ))} />
+      </Form.Item>
+      <Form.Item<AddAGVParams> name="speed" label="速度">
+        <InputNumber min={0.01} max={50} step={0.01} />
+      </Form.Item>
+      <Form.Item>
+        <Button type="primary" htmlType="submit">确定</Button>
+      </Form.Item>
+    </Form>
+  )
+}
+
+
 const OperationInfoForm: BaseFC<{
   formData: FormInstance<OperationState>,
   onFinish: () => void
@@ -859,7 +1013,7 @@ const RandParamConfigForm: BaseFC<{
         <InputNumber min={0.3} max={1} step={0.05} />
       </Form.Item>
       <Form.Item<GenerationParams> name="simple_mode" label="简单模式" valuePropName="checked">
-        <Checkbox/>
+        <Checkbox />
       </Form.Item>
       <Form.Item>
         <Button type="primary" htmlType="submit">确定</Button>
@@ -874,6 +1028,8 @@ const EnvEditor: BaseFC<{
   onStart: () => void,
 }> = (props) => {
 
+  const [messageApi, contextHolder] = message.useMessage();
+
   const [isRandModalOpen, setIsRandModalOpen] = useState(false)
   const [randParamsForm] = Form.useForm<GenerationParams>()
 
@@ -884,7 +1040,37 @@ const EnvEditor: BaseFC<{
     setIsAddOperationModalOpen(true)
   }
   const handelRemoveOperation = async (id: number) => {
-    props.setState(await removeOperation(props.state!, id))
+    removeOperation(props.state!, id).then((res) => {
+      props.setState(res)
+    }).catch((e) => {
+      messageApi.error(e)
+    })
+  }
+
+  const [isAddmachineModalOpen, setIsAddMachineModalOpen] = useState(false)
+  const [addMachineParamsForm] = Form.useForm<AddMachineParams>()
+  const handelAddMachine = async (relativeId: number, direction: { x: number, y: number }) => {
+    const relativePos = props.state!.machines.find((v) => v.id === relativeId)!.pos
+    addMachineParamsForm.setFieldsValue({
+      type: props.state!.machines.reduce((p, m) => Math.max(p, m.type) + 1, 0),
+      x: relativePos.x + direction.x * 10,
+      y: relativePos.y - direction.y * 10,
+      pathTo: [relativeId]
+    })
+    setIsAddMachineModalOpen(true)
+  }
+
+  const [isAddAGVModalOpen, setIsAddAGVModalOpen] = useState(false)
+  const [addAGVParamsForm] = Form.useForm<AddAGVParams>()
+  const handelAddAGV = () => {
+    setIsAddAGVModalOpen(true)
+  }
+  const handleRemoveAGV = (id: number) => {
+    props.setState((env) => {
+      const ret = structuredClone(env!)
+      ret.AGVs = ret.AGVs.filter((agv) => agv.id !== id)
+      return ret
+    })
   }
 
   const [selectedOperation, setSelectedOperation] = useState<number | null>(null)
@@ -910,10 +1096,19 @@ const EnvEditor: BaseFC<{
       setSelectedMachine(id)
     }
     else if (selectedMachine === id) {
-
+      removeMachine(props.state!, id).then((res) => {
+        props.setState(res)
+      }).catch((e) => {
+        messageApi.error(e)
+      })
+      setSelectedMachine(null)
     }
     else {
-      props.setState(await addPath(props.state!, selectedMachine, id))
+      addPath(props.state!, selectedMachine, id).then((res) => {
+        props.setState(res)
+      }).catch((e) => {
+        messageApi.error(e)
+      })
       setSelectedMachine(null)
     }
   }
@@ -929,6 +1124,7 @@ const EnvEditor: BaseFC<{
 
   return (
     <>
+      {contextHolder}
       <Layout className={props.className}>
         <Layout.Header css={css`
           padding: 0;
@@ -943,19 +1139,57 @@ const EnvEditor: BaseFC<{
             }
           `}>
             <Flex justify="flex-start" align="center" gap="small">
-              <Button type="primary" onClick={async () => {
-                const path = await open()
+              <Button type="primary" disabled={props.state === null} onClick={async () => {
+                const path = await save({
+                  filters: [{ name: "Graph file", extensions: ["graph"] }]
+                })
                 if (path !== null) {
-                  props.setState(await loadEnv(path))
+                  messageApi.open({ key: "save graph", type: "loading", content: "保存中..." })
+                  saveEnv(path, props.state!).then(() => {
+                    messageApi.open({ key: "save graph", type: "success", content: `已保存至${path}` })
+                  }).catch((e) => {
+                    messageApi.open({ key: "save graph", type: "error", content: `保存失败: ${e}` })
+                  })
+
+                }
+              }}>
+                保存
+              </Button>
+              <Button type="primary" onClick={async () => {
+                const path = await open({
+                  filters: [{ name: "Graph file", extensions: ["graph"] }]
+                })
+                if (path !== null) {
+                  messageApi.open({ key: "load graph", type: "loading", content: "加载中..." })
+                  loadEnv(path).then((res) => {
+                    props.setState(res)
+                    messageApi.open({ key: "load graph", type: "success", content: "加载完成" })
+                  }).catch((e) => {
+                    messageApi.open({ key: "load graph", type: "error", content: `加载失败: ${e}` })
+                  })
                 }
               }}>
                 读取
               </Button>
-              <Button type="primary" onClick={async () => props.setState(await newEnv())}>新建</Button>
+              <Button type="primary" onClick={async () => {
+                newEnv().then((res) => {
+                  props.setState(res)
+                }).catch((e) => {
+                  messageApi.error(e)
+                })
+              }}>
+                新建
+              </Button>
               <Space.Compact>
                 <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
                 <Button type="primary" icon={<RedoOutlined />}
-                  onClick={async () => { props.setState(await randEnv(randParamsForm.getFieldsValue())) }}
+                  onClick={async () => {
+                    randEnv(randParamsForm.getFieldsValue()).then((res) => {
+                      props.setState(res)
+                    }).catch((e) => {
+                      messageApi.error(e)
+                    })
+                  }}
                 />
               </Space.Compact>
               <Button type="primary" disabled={props.state === null} onClick={props.onStart} css={css`
@@ -979,7 +1213,9 @@ const EnvEditor: BaseFC<{
                     opacity: 0;
                   }
                 }
-              `}>开始</Button>
+              `}>
+                开始
+              </Button>
             </Flex>
           </Card>
         </Layout.Header>
@@ -1001,7 +1237,11 @@ const EnvEditor: BaseFC<{
                   `}
                 >
                   <Empty>
-                    <Button type="primary" onClick={async () => props.setState(await newEnv())}>新建</Button>
+                    <Button type="primary" onClick={async () => newEnv().then((res) => {
+                      props.setState(res)
+                    }).catch((e) => {
+                      messageApi.error(e)
+                    })}>新建</Button>
                   </Empty>
                 </Flex>
               ) : (
@@ -1025,7 +1265,9 @@ const EnvEditor: BaseFC<{
                           selected={selectedMachine}
                           onBackgroundClicked={() => setSelectedMachine(null)}
                           onMachineClicked={handelMachineClick}
-                          onMachineDragged={updateMachinePos} css={css`
+                          onMachineDragged={updateMachinePos}
+                          onAddMachine={handelAddMachine}
+                          css={css`
                             width: 100%;
                             height: 100%;
                           `}
@@ -1036,9 +1278,11 @@ const EnvEditor: BaseFC<{
                           padding: 15px;
                         `}>
                           {
-                            props.state.AGVs.map((v) => <AGVNode key={v.id} state={v} />)
+                            props.state.AGVs.map((v) => (
+                              <AGVNode key={v.id} onRemoveClick={() => handleRemoveAGV(v.id)} state={v} />
+                            ))
                           }
-                          <div css={css`
+                          <div onClick={handelAddAGV} css={css`
                             width: 50px;
                             height: 50px;
                             background-color: white;
@@ -1071,30 +1315,72 @@ const EnvEditor: BaseFC<{
           </Card>
         </Layout.Content>
       </Layout>
-      <Modal title="添加工序" open={isAddOperationModalOpen} footer={null}
-        onCancel={() => setIsAddOperationModalOpen(false)}
-      >
-        <AddOperationConfigForm formData={addOperationParamsForm} machines={props.state?.machines}
-          onFinish={async () => {
-            setIsAddOperationModalOpen(false)
-            props.setState(await addOperation(props.state!, addOperationParamsForm.getFieldsValue(true)))
-          }}
-        />
-      </Modal>
-      <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null}
-        onCancel={() => setIsOperationInfoModalOpen(false)}
-      >
-        <OperationInfoForm formData={operationInfoForm}
-          onFinish={async () => {
-            setIsOperationInfoModalOpen(false)
-          }}
-        />
-      </Modal>
+      {
+        props.state && (
+          <>
+            <Modal title="添加工序" open={isAddOperationModalOpen} footer={null}
+              onCancel={() => setIsAddOperationModalOpen(false)}
+            >
+              <AddOperationConfigForm formData={addOperationParamsForm} machines={props.state!.machines}
+                onFinish={async () => {
+                  setIsAddOperationModalOpen(false)
+                  addOperation(props.state!, addOperationParamsForm.getFieldsValue(true)).then((res) => {
+                    props.setState(res)
+                  }).catch((e) => {
+                    messageApi.error(e)
+                  })
+                }}
+              />
+            </Modal>
+            <Modal title="添加设备" open={isAddmachineModalOpen} footer={null}
+              onCancel={() => setIsAddMachineModalOpen(false)}
+            >
+              <AddMachineConfigForm formData={addMachineParamsForm} machines={props.state!.machines}
+                onFinish={async () => {
+                  setIsAddMachineModalOpen(false)
+                  addMachine(props.state!, addMachineParamsForm.getFieldsValue(true)).then((res) => {
+                    props.setState(res)
+                  }).catch((e) => {
+                    messageApi.error(e)
+                  })
+                }}
+              />
+            </Modal>
+            <Modal title="添加运载车" open={isAddAGVModalOpen} footer={null}
+              onCancel={() => setIsAddAGVModalOpen(false)}
+            >
+              <AddAGVConfigForm formData={addAGVParamsForm} machines={props.state!.machines}
+                onFinish={(values) => {
+                  setIsAddAGVModalOpen(false)
+                  addAGV(props.state!, values).then((res) => {
+                    props.setState(res)
+                  }).catch((e) => {
+                    messageApi.error(e)
+                  })
+                }}
+              />
+            </Modal>
+            <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null}
+              onCancel={() => setIsOperationInfoModalOpen(false)}
+            >
+              <OperationInfoForm formData={operationInfoForm}
+                onFinish={async () => {
+                  setIsOperationInfoModalOpen(false)
+                }}
+              />
+            </Modal>
+          </>
+        )
+      }
       <Modal title="参数设置" open={isRandModalOpen} footer={null} onCancel={() => setIsRandModalOpen(false)}>
         <RandParamConfigForm formData={randParamsForm}
           onFinish={async (values) => {
             setIsRandModalOpen(false)
-            props.setState(await randEnv(values))
+            randEnv(values).then((res) => {
+              props.setState(res)
+            }).catch((e) => {
+              messageApi.error(e)
+            })
           }}
         />
       </Modal>
