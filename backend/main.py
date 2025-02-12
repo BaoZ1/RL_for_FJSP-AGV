@@ -172,7 +172,7 @@ async def model_list():
 
 @app.get("/model/load")
 async def load_model(model_path: Annotated[str, Query()]):
-    model = Agent.load_from_checkpoint(model_path, envs=None)
+    model = Agent.load_from_checkpoint(model_path, envs=None, finished_batch_count=0)
     model.to(device)
     model.eval()
     models[model_path] = model

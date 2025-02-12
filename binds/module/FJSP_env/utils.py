@@ -36,7 +36,7 @@ def single_step_useful_first_predict(obs: Observation, rand_prob: float = 0):
             for i, action in enumerate(obs.action_list)
             if action.action_type in (ActionType.pick, ActionType.transport)
         ]
-        if np.random.rand() < rand_prob
+        if np.random.rand() > rand_prob
         else []
     )
     if len(useful_action_idxs) == 0:
@@ -48,12 +48,17 @@ def single_step_useful_first_predict(obs: Observation, rand_prob: float = 0):
     act = obs.action_list[act_idx]
     return act, act_idx
 
-def single_step_useful_only_predict(obs: Observation):
-    useful_action_idxs = [
+
+def single_step_useful_only_predict(obs: Observation, rand_prob: float = 0):
+    useful_action_idxs = (
+        [
             i
             for i, action in enumerate(obs.action_list)
             if action.action_type in (ActionType.pick, ActionType.transport)
         ]
+        if np.random.rand() > rand_prob
+        else [*range(len(obs.action_list))]
+    )
 
     if len(useful_action_idxs) == 0:
         i = obs.action_list.index(Action(ActionType.wait))
@@ -64,7 +69,10 @@ def single_step_useful_only_predict(obs: Observation):
     act = obs.action_list[act_idx]
     return act, act_idx
 
-async def simple_predict(graph: Graph, rule: Callable[[Observation], tuple[Action, int]]):
+
+async def simple_predict(
+    graph: Graph, rule: Callable[[Observation], tuple[Action, int]]
+):
     env = Environment.from_graphs([graph])
 
     for round_count in count(1):
@@ -88,6 +96,7 @@ async def simple_predict(graph: Graph, rule: Callable[[Observation], tuple[Actio
 
         await asyncio.sleep(0)
 
+
 class Environment:
     def __init__(
         self,
@@ -97,6 +106,7 @@ class Environment:
     ):
         self.count = count
         self.generate_params = params
+        self.params_total_task_count = np.ones(len(params))
         self.auto_refresh = auto_refresh
 
         self.envs: list[Graph] = []
@@ -125,8 +135,14 @@ class Environment:
 
     def generate_new(self) -> Graph:
         for try_num in count():
-            new_env = Graph.rand_generate(np.random.choice(self.generate_params))
+            param_idx = np.random.choice(
+                len(self.generate_params),
+                p=(1 / self.params_total_task_count) / np.sum(1 / self.params_total_task_count),
+            )
+            new_env = Graph.rand_generate(self.generate_params[param_idx])
             if self.test(new_env):
+                self.params_total_task_count[param_idx] += new_env.progress()[1]
+                self.params_total_task_count -= np.min(self.params_total_task_count) - 1
                 return new_env
             if try_num > 20:
                 raise Exception("bad parameters")
@@ -148,14 +164,10 @@ class Environment:
                     self.envs[i] = new_env
                     self.prev_lbs[i] = new_env.finish_time_lower_bound()
 
-        return [
-            Observation.from_env(env)
-            for env in self.envs
-            if not (env.finished())
-        ]
+        return [Observation.from_env(env) for env in self.envs if not (env.finished())]
 
     def step(
-        self, actions: list[Action], auto_wait: bool=True
+        self, actions: list[Action], auto_wait: bool = False
     ) -> tuple[list[float], list[bool], list[Observation]]:
         rewards = []
         dones = []
@@ -167,9 +179,9 @@ class Environment:
             reward = 0
             action = actions[action_idx]
             if action.action_type in (ActionType.pick, ActionType.transport):
-                reward += 0.2
-            elif action.action_type == ActionType.move:
-                reward += -0.05
+                reward += 5
+            # elif action.action_type == ActionType.move:
+            #     reward += -0.05
             new_env = env.act(action)
             if (
                 auto_wait
@@ -184,7 +196,7 @@ class Environment:
             reward += -d_lb
             if new_env.finished():
                 done = True
-                reward = 1
+                # reward = 1
             else:
                 done = False
             rewards.append(reward)

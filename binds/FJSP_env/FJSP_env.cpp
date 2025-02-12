@@ -1047,6 +1047,13 @@ tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
         }
     }
 
+    assert(!this->paths.empty());
+    for (auto [f_id, tos] : this->paths) {
+        for(auto [t_id, data] : tos) {
+            feature->distance.emplace_back(make_tuple(mapper->machine[f_id], mapper->machine[t_id], get<1>(data)));
+        }
+    }
+
     feature->AGV_features.resize(this->AGVs.size());
     auto AGV_with_idx = this->AGVs | views::values | views::enumerate;
     for (auto [i, AGV] : AGV_with_idx)

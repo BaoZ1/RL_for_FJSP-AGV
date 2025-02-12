@@ -95,6 +95,16 @@ def build_graph(feature: GraphFeature):
         [[x[2], x[3]] for x in feature.waiting], dtype=torch.float
     ).view(-1, 2)
 
+    graph["machine", "distance", "machine"].edge_index = contiguous_transpose(
+        torch.tensor([[x[0], x[1]] for x in feature.distance], dtype=torch.int).view(
+            -1, 2
+        )
+    )
+
+    graph["machine", "distance", "machine"].edge_attr = torch.tensor(
+        [[x[2]] for x in feature.distance], dtype=torch.float
+    ).view(-1, 1)
+
     graph["AGV", "position", "machine"].edge_index = contiguous_transpose(
         torch.tensor(feature.AGV_position, dtype=torch.int).view(-1, 2)
     )
@@ -146,7 +156,6 @@ def get_offsets(batch: Batch) -> dict[str, dict[int, int]]:
     return ret
 
 
-
 @dataclass
 class SequenceReplayItem:
     states: list[Observation]
@@ -156,7 +165,7 @@ class SequenceReplayItem:
     next_states: list[Observation]
 
 
-class ReplayBuffer[T]:
+class ReplayBuffer:
 
     def __init__(self, seq_len: int, max_len: int = 1000):
         self.buffer: list[SequenceReplayItem] = []
@@ -210,8 +219,8 @@ class ReplayBuffer[T]:
         return np.random.choice(self.buffer, num, False)
 
 
-class ReplayDataset[T](IterableDataset):
-    def __init__(self, buffer: ReplayBuffer[T], sample_size: int):
+class ReplayDataset(IterableDataset):
+    def __init__(self, buffer: ReplayBuffer, sample_size: int):
         super().__init__()
 
         self.buffer = buffer

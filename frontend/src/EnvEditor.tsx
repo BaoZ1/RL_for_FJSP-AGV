@@ -2,12 +2,12 @@
 
 import { useEffect, useState, useMemo, MouseEvent, WheelEvent, useRef } from "react"
 import {
-  Splitter, Button, Layout, Card, Empty, Flex, Modal, Form,
+  Splitter, Button, Layout, Card, Empty, Flex, Modal, Form, Popover,
   InputNumber, Space, FormInstance, FloatButton, Select, Checkbox, message,
 } from "antd"
 import { open, save } from "@tauri-apps/plugin-dialog"
 import { css } from "@emotion/react";
-import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon, arrow } from '@floating-ui/react';
+import { useFloating, useClientPoint, useInteractions, useHover, offset, safePolygon } from '@floating-ui/react';
 import {
   RedoOutlined, CaretRightFilled, AimOutlined,
   PlusCircleOutlined, CloseCircleOutlined, PlusOutlined
@@ -17,10 +17,14 @@ import {
   AGVState, MachineState, AddOperationParams, AddAGVParams,
   AddMachineParams
 } from "./types";
-import { addAGV, addMachine, addOperation, addPath, loadEnv, newEnv, randEnv, removeMachine, removeOperation, saveEnv } from "./backend-api";
+import { 
+  addAGV, addMachine, addOperation, addPath, loadEnv, 
+  newEnv, randEnv, removeMachine, removeOperation, saveEnv 
+} from "./backend-api";
 
 const OperationNode: BaseFC<{
-  operation: { id: number, x: number, y: number },
+  state: OperationState,
+  pos: { x: number, y: number },
   selected: boolean,
   onClick: () => void,
   onAddPredClick: () => void,
@@ -29,9 +33,7 @@ const OperationNode: BaseFC<{
   radius: number,
   scaleRatio: number
 }> = (props) => {
-  const [messageApi, contextHolder] = message.useMessage();
-
-  const type = ({ 0: "start", 9999: "end" } as const)[props.operation.id] || "normal"
+  const type = ({ 0: "start", 9999: "end" } as const)[props.state.id] || "normal"
 
   const scaleRatioRef = useRef(props.scaleRatio)
   useEffect(() => { scaleRatioRef.current = props.scaleRatio }, [props.scaleRatio])
@@ -120,33 +122,39 @@ const OperationNode: BaseFC<{
 
   return (
     <>
-      {contextHolder}
-      <div className={props.className} ref={setReference} {...getReferenceProps()}
-        onClick={(e) => {
-          e.stopPropagation()
-          props.onClick()
-        }}
-        css={css`
-          width: ${props.radius * 2}px;
-          height: ${props.radius * 2}px;
-          border-radius: ${props.radius}px;
-          border: 2px ${type === "normal" ? "solid" : "dashed"} ${props.selected ? "red" : "black"};
-          transform: translate(-50%, -50%);
-          position: absolute;
-          left: ${props.operation.x}px;
-          top: ${props.operation.y}px;
-          background-color: wheat;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          z-index: 1;
-          :hover {
-            border-color: red;
-          }
-        `}
-      >
-        {props.operation.id}
-      </div>
+      <Popover mouseEnterDelay={0} mouseLeaveDelay={0} title="详细信息" content={
+        <>
+          <p>machine type: {props.state.machine_type}</p>
+          <p>process time: {props.state.process_time.toFixed(2)}</p>
+        </>
+      }>
+        <div className={props.className} ref={setReference} {...getReferenceProps()}
+          onClick={(e) => {
+            e.stopPropagation()
+            props.onClick()
+          }}
+          css={css`
+            width: ${props.radius * 2}px;
+            height: ${props.radius * 2}px;
+            border-radius: ${props.radius}px;
+            border: 2px ${type === "normal" ? "solid" : "dashed"} ${props.selected ? "red" : "black"};
+            transform: translate(-50%, -50%);
+            position: absolute;
+            left: ${props.pos.x}px;
+            top: ${props.pos.y}px;
+            background-color: wheat;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1;
+            :hover {
+              border-color: red;
+            }
+          `}
+        >
+          {props.state.id}
+        </div>
+      </Popover>
       {
         isAddSuccOpen && type !== "end" && (
           <PlusCircleOutlined onClick={props.onAddSuccClick} css={css`
@@ -401,13 +409,16 @@ const OperationEditor: BaseFC<{
         <OperationLine key={`${p.id}-${s.id}`} p={p} s={s} nodeRadius={nodeRadius} scaleRatio={scaleRatio} />
       ))
     )),
-    operationPosList.map((operation) => (
-      <OperationNode key={operation.id} operation={operation} selected={operation.id === props.selectedOperation}
+    operationPosList.map((id_pos) => (
+      <OperationNode key={id_pos.id}
+        state={props.states.find((item) => item.id === id_pos.id)!}
+        pos={{ x: id_pos.x, y: id_pos.y }}
+        selected={id_pos.id === props.selectedOperation}
         radius={nodeRadius} scaleRatio={scaleRatio}
-        onClick={() => props.onOperationClick(operation.id)}
-        onAddPredClick={() => props.onAddOperation(null, operation.id)}
-        onAddSuccClick={() => props.onAddOperation(operation.id, null)}
-        onRemoveClick={() => props.onRemoveOperation(operation.id)}
+        onClick={() => props.onOperationClick(id_pos.id)}
+        onAddPredClick={() => props.onAddOperation(null, id_pos.id)}
+        onAddSuccClick={() => props.onAddOperation(id_pos.id, null)}
+        onRemoveClick={() => props.onRemoveOperation(id_pos.id)}
       />
     ))
   ], [operationPosList, scaleRatio, props.selectedOperation])
@@ -527,36 +538,43 @@ const MachineNode: BaseFC<{
 
   return (
     <>
-      <div className={props.className} ref={setReference} {...getReferenceProps()}
-        onMouseDown={trackDrag}
-        onMouseMove={(e) => {
-          const selfRect = reference!.getBoundingClientRect()
-          const dx = e.clientX - (selfRect.x + selfRect.width / 2)
-          const dy = e.clientY - (selfRect.y + selfRect.height / 2)
-          const len = Math.hypot(dx, dy)
-          setAddMachineBtnDirection({ x: dx / len, y: dy / len })
-        }}
-        onClick={(e) => {
-          e.stopPropagation()
-          props.onClick()
-        }}
-        css={css`
-          width: 50px;
-          height: 50px;
-          border-radius: 50%;
-          background-color: gray;
-          border: 2px solid ${props.selected ? "red" : "black"};
-          display: flex;
-          justify-content: center;
-          align-items: center;
+      <Popover mouseEnterDelay={0} mouseLeaveDelay={0} title="详细信息" content={
+        <>
+          <p>type: {props.state.type}</p>
+          <p>position: {`(${props.state.pos.x.toFixed(2)}, ${props.state.pos.y.toFixed(2)})`}</p>
+        </>
+      }>
+        <div className={props.className} ref={setReference} {...getReferenceProps()}
+          onMouseDown={trackDrag}
+          onMouseMove={(e) => {
+            const selfRect = reference!.getBoundingClientRect()
+            const dx = e.clientX - (selfRect.x + selfRect.width / 2)
+            const dy = e.clientY - (selfRect.y + selfRect.height / 2)
+            const len = Math.hypot(dx, dy)
+            setAddMachineBtnDirection({ x: dx / len, y: dy / len })
+          }}
+          onClick={(e) => {
+            e.stopPropagation()
+            props.onClick()
+          }}
+          css={css`
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background-color: gray;
+            border: 2px solid ${props.selected ? "red" : "black"};
+            display: flex;
+            justify-content: center;
+            align-items: center;
 
-          &:hover {
-            border-color: red;
-          }
-      `}
-      >
-        {props.state.id}
-      </div>
+            &:hover {
+              border-color: red;
+            }
+        `}
+        >
+          {props.state.id}
+        </div>
+      </Popover>
       {
         isAddMachineOpen && (
           <PlusCircleOutlined ref={addMachineRefs.setFloating} {...getAddMachineFloatingProps()}
@@ -570,7 +588,9 @@ const MachineNode: BaseFC<{
               transform: translate(-50%, -50%);
               background-color: white;
               border-radius: 50%;
-              color: #888888;
+              color: #777777;
+              background-color: white;
+              z-index: 10;
 
               :hover {
                 color: black;
@@ -702,18 +722,6 @@ const MachineEditor: BaseFC<{
 
 const AGVNode: BaseFC<{ state: AGVState, onRemoveClick: () => void }> = (props) => {
   const [reference, setReference] = useState<HTMLElement | null>(null)
-  const arrowRef = useRef(null)
-
-  const [isInfoOpen, setIsInfoOpen] = useState(false);
-  const { refs: infoRefs, floatingStyles: infoFloatingStyles, context: infoContexts, middlewareData } = useFloating({
-    placement: "top",
-    open: isInfoOpen,
-    onOpenChange: setIsInfoOpen,
-    elements: { reference },
-    middleware: [offset(10), arrow({ element: arrowRef })]
-  });
-  const infoHover = useHover(infoContexts);
-  const { getFloatingProps: getInfoFloatingProps } = useInteractions([infoHover]);
 
   const [isRemoveOpen, setIsRemoveOpen] = useState(false);
   const { refs: removeRefs, floatingStyles: removeFloatingStyles, context: removeContexts } = useFloating({
@@ -725,11 +733,17 @@ const AGVNode: BaseFC<{ state: AGVState, onRemoveClick: () => void }> = (props) 
   const removeHover = useHover(removeContexts, { handleClose: safePolygon() });
   const { getFloatingProps: getRemoveFloatingProps } = useInteractions([removeHover]);
 
-  const { getReferenceProps } = useInteractions([infoHover, removeHover])
+  const { getReferenceProps } = useInteractions([removeHover])
 
   return (
     <>
-      <div className={props.className} ref={setReference} {...getReferenceProps()} css={css`
+      <Popover mouseEnterDelay={0} mouseLeaveDelay={0} title="详细信息" content={
+        <>
+          <p>speed: {props.state.speed.toFixed(2)}</p>
+          <p>init_pos: {props.state.position}</p>
+        </>
+      }>
+        <div className={props.className} ref={setReference} {...getReferenceProps()} css={css`
         width: 50px;
         height: 50px;
         background-color: black;
@@ -738,36 +752,14 @@ const AGVNode: BaseFC<{ state: AGVState, onRemoveClick: () => void }> = (props) 
         align-items: center;
         border-radius: 50%;
       `}>
-        <div css={css`
+          <div css={css`
           color: white;
           font-size: larger;
         `}>
-          {props.state.id}
-        </div>
-      </div>
-      {
-        isInfoOpen && (
-          <div ref={infoRefs.setFloating} {...getInfoFloatingProps()} style={infoFloatingStyles} css={css`
-            padding: 5px;
-            border: 1px solid gray;
-            background-color: white;
-            border-radius: 5px;
-            z-index: 10;
-          `}>
-            12345679
-            <div ref={arrowRef} css={css`
-              position: absolute;
-              left: ${middlewareData.arrow?.x}px;
-              bottom: -10px;
-              width: 0;
-              height: 0;
-              border-left: 6px solid transparent;  
-              border-right: 6px solid transparent;  
-              border-top: 10px solid gray; 
-            `} />
+            {props.state.id}
           </div>
-        )
-      }
+        </div>
+      </Popover>
       {
         isRemoveOpen && (
           <CloseCircleOutlined onClick={props.onRemoveClick} css={css`

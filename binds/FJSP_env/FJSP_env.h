@@ -1,14 +1,14 @@
 #ifndef FJSP_ENV_H
 #define FJSP_ENV_H
 
-#include <string>
-#include <sstream>
-#include <set>
-#include <optional>
-#include <variant>
-#include <map>
 #include <functional>
+#include <map>
+#include <optional>
 #include <pybind11/pybind11.h>
+#include <set>
+#include <sstream>
+#include <string>
+#include <variant>
 
 #include "aux_structs.h"
 
@@ -71,7 +71,7 @@ struct Action
     Action(ActionType);
     Action(ActionType, AGVId, MachineId);
     Action(ActionType, AGVId, MachineId, Product);
-    auto operator<=>(const Action&) const = default;
+    auto operator<=>(const Action &) const = default;
     string repr() const;
 
     ActionType type;
@@ -210,6 +210,7 @@ struct GraphFeature
     vector<tuple<size_t, size_t>> processable_idx;         // machine_idx, operation_idx
     vector<tuple<size_t, size_t, float>> processing;       // machine_idx, operation_idx, rest_time
     vector<tuple<size_t, size_t, size_t, size_t>> waiting; // machine_idx, operation_idx, total, current
+    vector<tuple<size_t, size_t, float>> distance;        // machine_idx, machine_idx, dist
     vector<RepeatedTuple<float, Graph::AGV_feature_size>> AGV_features;
     vector<tuple<size_t, size_t>> AGV_position;       // AGV_idx, machine_idx
     vector<tuple<size_t, size_t, float>> AGV_target;  // AGV_idx, machine_idx, rest_time

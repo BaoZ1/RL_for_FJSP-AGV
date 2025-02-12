@@ -1,4 +1,4 @@
-import { AddAGVParams, AddMachineParams, AddOperationParams, AGVState, EnvState, GenerationParams, Paths, PredictProgress } from "./types"
+import { AddAGVParams, AddMachineParams, AddOperationParams, EnvState, GenerationParams, Paths, PredictProgress } from "./types"
 import { fetch } from "@tauri-apps/plugin-http"
 import WebSocket from '@tauri-apps/plugin-websocket';
 
@@ -9,7 +9,7 @@ const BASE_PATH = `http://localhost:${PORT}`
 const handleError = async (response: Response) => {
   if (!response.ok) {
     if(response.status === 503) {
-      throw "服务器异常"
+      throw "服务端异常"
     }
     const info = await response.text()
     console.log(response, info)
