@@ -3,7 +3,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import IterableDataset, DataLoader, Dataset
 from torch_geometric.data import HeteroData, Batch, Data
-from FJSP_env import GraphFeature, Action, Observation
+from FJSP_env import Graph, GraphFeature, Action, Observation
 from dataclasses import dataclass
 
 
@@ -158,11 +158,11 @@ def get_offsets(batch: Batch) -> dict[str, dict[int, int]]:
 
 @dataclass
 class SequenceReplayItem:
-    states: list[Observation]
+    graphs: list[Graph]
     action_idxs: list[int]
     rewards: list[float]
     dones: list[bool]
-    next_states: list[Observation]
+    next_graphs: list[Graph]
 
 
 class ReplayBuffer:
@@ -173,30 +173,30 @@ class ReplayBuffer:
 
         self.seq_len = seq_len
         self.temp_buffer: list[
-            list[tuple[Observation, int, float, bool, Observation]]
+            list[tuple[Graph, int, float, bool, Graph]]
         ] = []
 
     def append(
         self,
-        states: list[Observation],
+        graphs: list[Graph],
         action_idxs: list[int],
         rewards: list[float],
         dones: list[bool],
-        next_states: list[Observation],
+        next_graphs: list[Graph],
     ):
         if len(self.temp_buffer) != 0:
-            assert len(states) == len(self.temp_buffer)
+            assert len(graphs) == len(self.temp_buffer)
         else:
-            for _ in range(len(states)):
+            for _ in range(len(graphs)):
                 self.temp_buffer.append([])
         for temp_buffer, data in zip(
             self.temp_buffer,
             zip(
-                states,
+                graphs,
                 action_idxs,
                 rewards,
                 dones,
-                next_states,
+                next_graphs,
             ),
         ):
             temp_buffer.append(data)

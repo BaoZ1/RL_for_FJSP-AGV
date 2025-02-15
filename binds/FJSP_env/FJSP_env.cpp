@@ -853,12 +853,16 @@ shared_ptr<Graph> Graph::reset() const
         operation->status = OperationStatus::blocked;
         operation->processing_machine = nullopt;
         operation->finish_timestamp = 0;
+        operation->arrived_preds.clear();
+        operation->sent_succs.clear();
     }
     for (auto machine : ret->machines | views::values)
     {
         machine->status = MachineStatus::idle;
         machine->working_operation = nullopt;
         machine->waiting_operations.clear();
+        machine->materials.clear();
+        machine->products.clear();     
     }
     for (auto AGV : ret->AGVs | views::values)
     {
@@ -1361,6 +1365,7 @@ void Graph::act_wait()
 shared_ptr<Graph> Graph::act(Action action) const
 {
     assert(this->inited);
+    assert(!this->finished());
 
     auto ret = this->copy();
 

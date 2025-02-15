@@ -21,6 +21,7 @@ from FJSP_env import (
 from .utils import *
 import lightning as L
 from lightning.pytorch.core.optimizer import LightningOptimizer
+from lightning.pytorch.trainer.states import RunningStage
 from collections.abc import Callable
 from tqdm import tqdm
 from typing import Self
@@ -566,13 +567,13 @@ class ValueNet(nn.Module):
 
         self.model = nn.Sequential(
             ResidualLinear(state_channels, hidden_channels),
-            nn.BatchNorm1d(hidden_channels),
-            nn.Tanh(),
+            # nn.BatchNorm1d(hidden_channels),
+            nn.LeakyReLU(),
             *[
                 nn.Sequential(
                     ResidualLinear(hidden_channels, hidden_channels),
-                    nn.BatchNorm1d(hidden_channels),
-                    nn.Tanh(),
+                    # nn.BatchNorm1d(hidden_channels),
+                    nn.LeakyReLU(),
                 )
                 for _ in range(stack_num)
             ],
@@ -598,11 +599,11 @@ class PolicyNet(nn.Module):
         base_channels = state_channels + action_channels
         self.model = nn.Sequential(
             ResidualLinear(base_channels, hidden_channels),
-            nn.Tanh(),
+            nn.LeakyReLU(),
             *[
                 nn.Sequential(
                     ResidualLinear(hidden_channels, hidden_channels),
-                    nn.Tanh(),
+                    nn.LeakyReLU(),
                 )
                 for _ in range(stack_num)
             ],
@@ -878,25 +879,38 @@ class Node:
         self.parent = parent
         self.index = index
         self.logit = logit
-        self.children: list[Self] = []
+        self.children: list[Node] = []
         self.value_list: list[float] = []
         self.visit_count = 0
         self.depth = 0 if parent is None else parent.depth + 1
 
     def expand(
         self,
-        state: Tensor,
-        actions: Tensor,
+        graph: Graph,
+        actions: list[Action],
         value_prefix: float,
         hidden: tuple[Tensor, Tensor],
         logits: Tensor,
     ):
-        self.state = state
+        self.graph = graph.copy()
         self.actions = actions
         self.value_prefix = value_prefix
         self.hidden = hidden
-        for i in range(actions.size(0)):
+        for i in range(len(actions)):
             self.children.append(Node(self, i, logits[i].item()))
+
+        self.finished = self.graph.finished()
+        p = self
+        while (p := p.parent) is not None:
+            children_to_check = (
+                [p.children[i] for i in p.remain_actions_idx]
+                if isinstance(p, RootNode)
+                else p.children
+            )
+            if all([c.expanded() and c.finished for c in children_to_check]):
+                p.finished = True
+            else:
+                break
 
     def logits(self):
         return [child.logit for child in self.children]
@@ -944,104 +958,160 @@ class Node:
         completed_Qs = np.array(completed_Qs)
         child_visit_counts = np.array([child.visit_count for child in self.children])
         max_child_visit_count = child_visit_counts.max()
-        return tensor((50 + max_child_visit_count) * 0.1 * completed_Qs)
+        return tensor((50 + max_child_visit_count) * 0.02 * completed_Qs)
 
     def improved_policy(self):
         logits = tensor(self.logits())
-        # if logits.numel() > 1:
-        #     logits = (logits - logits.mean()) / logits.std()
-        # else:
-        #     logits = logits - logits.mean()
+        if logits.numel() > 1:
+            logits = (logits - logits.mean()) / logits.std()
+        else:
+            logits = logits - logits.mean()
         sigma_Qs = self.sigma_Qs()
-        # if not (sigma_Qs == sigma_Qs[0]).all():
-        #     sigma_Qs = (sigma_Qs - sigma_Qs.mean()) / sigma_Qs.std()
-        # else:
-        #     sigma_Qs = sigma_Qs - sigma_Qs.mean()
+        if not (sigma_Qs == sigma_Qs[0]).all():
+            sigma_Qs = (sigma_Qs - sigma_Qs.mean()) / sigma_Qs.std()
+        else:
+            sigma_Qs = sigma_Qs - sigma_Qs.mean()
+        # if self.depth == 0:
+        #     print(logits, sigma_Qs)
         return F.softmax(logits + sigma_Qs, 0)
 
     def select_action(self):
-        child_visit_counts = torch.tensor(
-            [child.visit_count for child in self.children]
+        child_visit_counts = tensor([child.visit_count for child in self.children])
+        finished_adj = tensor(
+            [
+                -torch.inf if child.expanded() and child.finished else 0
+                for child in self.children
+            ]
         )
         idx: int = torch.argmax(
-            self.improved_policy() - child_visit_counts / (1 + child_visit_counts.sum())
+            self.improved_policy()
+            - child_visit_counts / (1 + child_visit_counts.sum())
+            + finished_adj
         ).item()
         return self.children[idx]
 
-    def select_root_action(self, available_index: list[int]):
+
+class RootNode(Node):
+    def __init__(self):
+        super().__init__(None, -1, 1)
+
+    def set_remain_actions_idx(self, idx: list[int]):
+        self.remain_actions_idx = idx
+        if all(
+            [self.children[i].expanded() and self.children[i].finished for i in idx]
+        ):
+            self.finished = True
+
+    def select_action(self):
         min_visit_count = self.visit_count + 1
         min_visit_idx = -1
-        for idx in available_index:
+        for idx in self.remain_actions_idx:
             if not self.children[idx].expanded():
                 return self.children[idx]
-            if (c := self.children[idx].visit_count) < min_visit_count:
+            if (
+                c := self.children[idx].visit_count < min_visit_count
+                and not self.children[idx].finished
+            ):
                 min_visit_count = c
                 min_visit_idx = idx
         return self.children[min_visit_idx]
 
 
 class MCTS:
-    def __init__(
-        self,
-        policy_net: PolicyNet,
-        value_net: ValueNet,
-        predict_net: PredictNet,
-        generate_net: ActionGenerator,
-        value_prefix_net: ValuePrefixNet,
-    ):
-        self.device: torch.device | None = None
+    def __init__(self, agent: "Agent"):
+        self.agent = agent
 
-        self.policy_net = policy_net
-        self.value_net = value_net
-        self.predict_net = predict_net
-        self.generate_net = generate_net
-        self.value_prefix_net = value_prefix_net
+    @property
+    def value_net(self):
+        return (
+            self.agent.value_target
+            if self.agent._trainer is not None and self.agent.trainer.state.stage == RunningStage.TRAINING
+            else self.agent.value_net
+        )
+
+    @property
+    def policy_net(self):
+        return (
+            self.agent.policy_target
+            if self.agent._trainer is not None and self.agent.trainer.state.stage == RunningStage.TRAINING
+            else self.agent.policy_net
+        )
 
     @torch.no_grad()
     def search(
         self,
-        states: Tensor,
-        action_lists: list[Tensor],
+        graphs: list[Graph],
         root_sample_count: int,
         simulation_count: int,
     ):
-        self.device = states.device
         assert root_sample_count & (root_sample_count - 1) == 0  # 2的幂
 
-        roots: list[Node] = []
-        for state, actions, value, hidden in zip(
-            states,
-            action_lists,
-            self.value_net(states),
+        obs = [Observation.from_env(g) for g in graphs]
+
+        batched_graph = Batch.from_data_list([build_graph(o.feature) for o in obs]).to(
+            self.agent.device
+        )
+
+        (
+            node_states,
+            _,
+            graph_states,
+        ) = self.agent.extractor(batched_graph)
+
+        actions_list = [o.action_list for o in obs]
+        actions_embs = self.agent.action_encoder(
+            actions_list,
+            node_states,
+            get_offsets(batched_graph),
+            [o.mapper for o in obs],
+        )
+
+        roots: list[RootNode] = []
+        for (graph, state, actions, actions_emb, value), hidden in zip(
+            zip(
+                graphs,
+                graph_states,
+                actions_list,
+                actions_embs,
+                self.value_net(graph_states),
+            ),
             zip(
                 *[
                     torch.unbind(h, 1)
-                    for h in self.value_prefix_net(states.unsqueeze(1), None)[1]
+                    for h in self.agent.value_prefix_net(
+                        graph_states.unsqueeze(1), None
+                    )[1]
                 ]
             ),
         ):
-            logits = self.policy_net(state, actions)
-            new_root = Node(None, -1, 1)
+            new_root = RootNode()
             new_root.visit_count += 1
             new_root.value_list.append(value.item())
-            new_root.expand(state, actions, 0, hidden, logits)
+            new_root.expand(
+                graph,
+                actions,
+                0,
+                hidden,
+                self.policy_net(state, actions_emb),
+            )
             roots.append(new_root)
         gs: list[Tensor] = []
         remaining_actions_index: list[list[int]] = []
         sim_SH_idxs: list[list[int]] = []
         sim_stages: list[int] = []
-        for i, actions in enumerate(action_lists):
+        for i, actions in enumerate(actions_embs):
             gumbel = torch.distributions.Gumbel(0, 1)
-            g: Tensor = gumbel.sample([actions.size(0)]).to(self.device)
+            g: Tensor = gumbel.sample([actions.size(0)]).to(self.agent.device)
             gs.append(g)
-            logits = tensor(roots[i].logits(), device=self.device)
+            logits = tensor(roots[i].logits(), device=self.agent.device)
             begin_count = min(root_sample_count, actions.size(0))
             sim_SH_idxs.append(
                 self.SH_idx(begin_count, root_sample_count, simulation_count)
             )
             sim_stages.append(0)
-            topk_indices = torch.topk(g + logits, begin_count).indices
-            remaining_actions_index.append(topk_indices.tolist())
+            topk_indices = torch.topk(g + logits, begin_count).indices.tolist()
+            roots[i].set_remain_actions_idx(topk_indices)
+            remaining_actions_index.append(topk_indices)
 
         # remaining_action_count = root_sample_count
         # phase_finish_idx = self.phase_step_num(
@@ -1052,81 +1122,112 @@ class MCTS:
         for sim_idx in count():
             target_leaves: list[Node] = []
             target_actions = []
-            parent_states = []
+            parent_graphs = []
             hiddens = ([], [])
-            sim_state_idx = []
+            sim_state_idx: list[int] = []
             for i, (root, actions_index, counts, stage) in enumerate(
                 zip(roots, remaining_actions_index, sim_SH_idxs, sim_stages)
             ):
                 if stage == len(counts):
                     assert len(actions_index) == 1
                     continue
+
                 sim_state_idx.append(i)
-                node = root.select_root_action(actions_index)
+                if root.finished:
+                    continue
+
+                node = root.select_action()
                 while node.expanded():
                     node = node.select_action()
                 target_leaves.append(node)
                 target_actions.append(node.parent.actions[node.index])
-                parent_states.append(node.parent.state)
+                parent_graphs.append(node.parent.graph)
+                try:
+                    assert not node.parent.finished
+                except:
+                    print(root.finished)
+                    print(node.parent.depth)
+                    raise Exception
                 hiddens[0].append(node.parent.hidden[0])
                 hiddens[1].append(node.parent.hidden[1])
 
             if len(sim_state_idx) == 0:
                 break
+            
+            if len(target_leaves) > 0:
+                env = Environment.from_graphs(parent_graphs)
+                obs = env.step(target_actions)[2]
+                batched_graph = Batch.from_data_list(
+                    [build_graph(o.feature) for o in obs],
+                ).to(self.agent.device)
+                (
+                    node_states,
+                    _,
+                    graph_states,
+                ) = self.agent.extractor(batched_graph)
 
-            states = self.predict_net(
-                torch.stack(parent_states),
-                torch.stack(target_actions),
-            )
-            values = self.value_net(states)
-            value_prefixs, new_hiddens = self.value_prefix_net(
-                states.unsqueeze(1),
-                (torch.stack(hiddens[0], 1), torch.stack(hiddens[1], 1)),
-            )
-            actions = self.generate_net.generate(states)
-            logit_lists = self.policy_net(states, actions)
-
-            for node, (
-                state,
-                action,
-                value_prefix,
-                hidden_0,
-                hidden_1,
-                value,
-                logits,
-            ) in zip(
-                target_leaves,
-                zip(
-                    states,
-                    actions,
-                    value_prefixs,
-                    torch.unbind(new_hiddens[0], 1),
-                    torch.unbind(new_hiddens[1], 1),
-                    values,
-                    logit_lists,
-                ),
-            ):
-                node.expand(
-                    state,
-                    action,
-                    value_prefix.item(),
-                    (hidden_0, hidden_1),
-                    logits,
+                values = self.value_net(graph_states)
+                value_prefixs, new_hiddens = self.agent.value_prefix_net(
+                    graph_states.unsqueeze(1),
+                    (torch.stack(hiddens[0], 1), torch.stack(hiddens[1], 1)),
                 )
-                while True:
-                    node.visit_count += 1
-                    node.value_list.append(value.item())
-                    if (p := node.parent) is not None:
-                        value = node.reward() + Agent.discount * value
-                        node = p
-                    else:
-                        break
+                actions_list = [o.action_list for o in obs]
+                actions_embs = self.agent.action_encoder(
+                    actions_list,
+                    node_states,
+                    get_offsets(batched_graph),
+                    [o.mapper for o in obs],
+                )
+
+                for node, (
+                    (
+                        graph,
+                        states,
+                        actions,
+                        actions_emb,
+                        value_prefix,
+                    ),
+                    hidden_0,
+                    hidden_1,
+                    value,
+                ) in zip(
+                    target_leaves,
+                    zip(
+                        zip(
+                            env.envs,
+                            graph_states,
+                            actions_list,
+                            actions_embs,
+                            value_prefixs,
+                        ),
+                        torch.unbind(new_hiddens[0], 1),
+                        torch.unbind(new_hiddens[1], 1),
+                        values,
+                    ),
+                ):
+                    node.expand(
+                        graph,
+                        actions,
+                        value_prefix.item(),
+                        (hidden_0, hidden_1),
+                        self.policy_net(states, actions_emb),
+                    )
+                    while True:
+                        node.visit_count += 1
+                        node.value_list.append(value.item())
+                        if (p := node.parent) is not None:
+                            value = node.reward() + Agent.discount * value
+                            node = p
+                        else:
+                            break
 
             for idx in sim_state_idx:
                 if sim_SH_idxs[idx][sim_stages[idx]] == sim_idx:
-                    remaining_actions_index[idx] = self.sequential_halving(
+                    new_idx = self.sequential_halving(
                         roots[idx], gs[idx], remaining_actions_index[idx]
                     )
+                    roots[idx].set_remain_actions_idx(new_idx)
+                    remaining_actions_index[idx] = new_idx
                     sim_stages[idx] += 1
 
             # if sim_idx == phase_finish_idx:
@@ -1145,10 +1246,12 @@ class MCTS:
 
         assert all(len(idxs) == 1 for idxs in remaining_actions_index)
         target_values = tensor(
-            [root.value() for root in roots], dtype=torch.float, device=self.device
+            [root.value() for root in roots],
+            dtype=torch.float,
+            device=self.agent.device,
         )
         target_policies = [
-            root.improved_policy().float().to(self.device) for root in roots
+            root.improved_policy().float().to(self.agent.device) for root in roots
         ]
         return (
             [idxs[0] for idxs in remaining_actions_index],
@@ -1188,8 +1291,8 @@ class MCTS:
 
     def sequential_halving(self, root: Node, gs: Tensor, action_idx: list[int]):
         g = gs[action_idx]
-        logits = tensor(root.logits())[action_idx].to(self.device)
-        sigma_Qs = root.sigma_Qs()[action_idx].to(self.device)
+        logits = tensor(root.logits())[action_idx].to(self.agent.device)
+        sigma_Qs = root.sigma_Qs()[action_idx].to(self.agent.device)
         remain_idx = torch.topk(
             g + logits + sigma_Qs, math.ceil(len(action_idx) / 2)
         ).indices
@@ -1211,7 +1314,7 @@ class MCTS:
 
 
 class Agent(L.LightningModule):
-    discount = 0.997
+    discount = 1
 
     class TrainStage(IntEnum):
         encode = auto()
@@ -1306,35 +1409,29 @@ class Agent(L.LightningModule):
             policy_hidden_channel,
             policy_stack_num,
         )
-        self.predictor = PredictNet(
-            graph_channels,
-            action_channels,
-            predict_hidden_channel,
-            predict_stack_num,
-        )
+        # self.predictor = PredictNet(
+        #     graph_channels,
+        #     action_channels,
+        #     predict_hidden_channel,
+        #     predict_stack_num,
+        # )
         self.value_prefix_net = ValuePrefixNet(
             graph_channels, prefix_hidden_channel, prefix_stack_num
         )
-        self.action_generator = ActionGenerator(
-            graph_channels,
-            action_channels,
-            generate_count,
-            gen_hidden_channels,
-            gen_stack_num,
-            dis_hidden_channels,
-            dis_stack_num,
-            cls_emb_dim,
-            cls_hidden_channels,
-            cls_stack_num,
-        )
+        # self.action_generator = ActionGenerator(
+        #     graph_channels,
+        #     action_channels,
+        #     generate_count,
+        #     gen_hidden_channels,
+        #     gen_stack_num,
+        #     dis_hidden_channels,
+        #     dis_stack_num,
+        #     cls_emb_dim,
+        #     cls_hidden_channels,
+        #     cls_stack_num,
+        # )
 
-        self.mcts = MCTS(
-            self.policy_net,
-            self.value_net,
-            self.predictor,
-            self.action_generator,
-            self.value_prefix_net,
-        )
+        self.mcts = MCTS(self)
 
         self.root_sample_count = root_sample_count
         self.simulation_count = simulation_count
@@ -1384,13 +1481,13 @@ class Agent(L.LightningModule):
                     "action_encoder",
                     "action_decoder",
                     "value_prefix_net",
-                    "predictor",
+                    # "predictor",
                 ]
             )
         if Agent.TrainStage._value in stages:
             load_modules.extend(["value_net"])
-        if Agent.TrainStage.generate in stages:
-            load_modules.extend(["action_generator"])
+        # if Agent.TrainStage.generate in stages:
+        #     load_modules.extend(["action_generator"])
         if Agent.TrainStage.policy in stages:
             load_modules.extend(["policy_net"])
 
@@ -1411,9 +1508,9 @@ class Agent(L.LightningModule):
         torch.compile(self.value_target, fullgraph=True)
         torch.compile(self.policy_net, fullgraph=True)
         torch.compile(self.policy_target, fullgraph=True)
-        torch.compile(self.predictor, fullgraph=True)
+        # torch.compile(self.predictor, fullgraph=True)
         torch.compile(self.value_prefix_net, fullgraph=True)
-        torch.compile(self.action_generator, fullgraph=True)
+        # torch.compile(self.action_generator, fullgraph=True)
 
     def prepare_data(self):
         assert self.envs is not None
@@ -1429,11 +1526,11 @@ class Agent(L.LightningModule):
                 Environment(1, [params], False).envs[0]
                 for params in self.envs.generate_params
             ]
-        if self.stage == Agent.TrainStage.generate:
-            return None, [
-                Environment(1, [params], False).envs[0]
-                for params in self.envs.generate_params
-            ]
+        # if self.stage == Agent.TrainStage.generate:
+        #     return None, [
+        #         Environment(1, [params], False).envs[0]
+        #         for params in self.envs.generate_params
+        #     ]
         if self.stage >= Agent.TrainStage.policy:
             temp_envs = [
                 Environment(1, [params], False) for params in self.envs.generate_params
@@ -1442,12 +1539,10 @@ class Agent(L.LightningModule):
             graphs: list[Graph] = []
             for env_i, env in enumerate(temp_envs):
                 env_timestamps: list[float] = []
-                env.reset()
-                graph = env.envs[0]
                 for _ in tqdm(
                     range(self.val_predict_num), f"Baseline_{env_i}", leave=False
                 ):
-                    env.reset([graph])
+                    env.reset(True)
                     while True:
                         obs = env.observe()
                         act, _ = single_step_useful_only_predict(obs[0])
@@ -1456,13 +1551,14 @@ class Agent(L.LightningModule):
                             break
                     env_timestamps.append(env.envs[0].get_timestamp())
                 timestamps.append(np.mean(env_timestamps))
-                graphs.append(graph)
+                graphs.append(env.envs[0].reset())
             return np.array(timestamps), graphs
 
     def init_buffer(self):
         progress = tqdm(total=self.epoch_size, desc="Init Buffer")
         while True:
             obs = self.envs.observe()
+            graphs = [g.copy() for g in self.envs.envs]
             if self.stage == Agent.TrainStage.explore:
                 acts, act_idxs = self.single_step_predict(
                     obs,
@@ -1476,14 +1572,14 @@ class Agent(L.LightningModule):
                     act, act_idx = single_step_useful_only_predict(ob, 0.1)
                     acts.append(act)
                     act_idxs.append(act_idx)
-            rewards, dones, next_states = self.envs.step(acts)
+            rewards, dones, _ = self.envs.step(acts)
             prev_buffer_size = len(self.buffer.buffer)
             self.buffer.append(
-                obs,
+                graphs,
                 act_idxs,
                 rewards,
                 dones,
-                next_states,
+                [g.copy() for g in self.envs.envs],
             )
             buffer_size = len(self.buffer.buffer)
             progress.update(buffer_size - prev_buffer_size)
@@ -1497,7 +1593,7 @@ class Agent(L.LightningModule):
                 self.action_encoder.parameters(),
                 self.action_decoder.parameters(),
                 self.value_prefix_net.parameters(),
-                self.predictor.parameters(),
+                # self.predictor.parameters(),
             ),
             self.lr,
         )
@@ -1507,7 +1603,7 @@ class Agent(L.LightningModule):
             0.99,
         )
 
-        value_stage_opt = optim.SGD(
+        value_stage_opt = optim.Adam(
             self.value_net.parameters(),
             self.lr,
         )
@@ -1517,29 +1613,29 @@ class Agent(L.LightningModule):
             0.99,
         )
 
-        discriminator_opt = optim.Adam(
-            self.action_generator.discriminator.parameters(),
-            self.lr,
-            (0, 0.9),
-            weight_decay=1e-3,
-        )
-        discriminator_sch = lr_scheduler.StepLR(
-            discriminator_opt,
-            self.opt_step_size,
-            0.99,
-        )
+        # discriminator_opt = optim.Adam(
+        #     self.action_generator.discriminator.parameters(),
+        #     self.lr,
+        #     (0, 0.9),
+        #     weight_decay=1e-3,
+        # )
+        # discriminator_sch = lr_scheduler.StepLR(
+        #     discriminator_opt,
+        #     self.opt_step_size,
+        #     0.99,
+        # )
 
-        generator_opt = optim.Adam(
-            self.action_generator.generator.parameters(),
-            self.lr,
-            (0, 0.9),
-            weight_decay=1e-3,
-        )
-        generator_sch = lr_scheduler.StepLR(
-            generator_opt,
-            self.opt_step_size,
-            0.99,
-        )
+        # generator_opt = optim.Adam(
+        #     self.action_generator.generator.parameters(),
+        #     self.lr,
+        #     (0, 0.9),
+        #     weight_decay=1e-3,
+        # )
+        # generator_sch = lr_scheduler.StepLR(
+        #     generator_opt,
+        #     self.opt_step_size,
+        #     0.99,
+        # )
 
         policy_opt = optim.SGD(
             self.policy_net.parameters(),
@@ -1563,15 +1659,15 @@ class Agent(L.LightningModule):
         return [
             encode_stage_opt,
             value_stage_opt,
-            discriminator_opt,
-            generator_opt,
+            # discriminator_opt,
+            # generator_opt,
             policy_opt,
             explore_opt,
         ], [
             encode_stage_sch,
             value_stage_sch,
-            discriminator_sch,
-            generator_sch,
+            # discriminator_sch,
+            # generator_sch,
             policy_sch,
             explore_sch,
         ]
@@ -1602,6 +1698,7 @@ class Agent(L.LightningModule):
     def play_step(self):
         for _ in range(5):
             obs = self.envs.observe()
+            graphs = [g.copy() for g in self.envs.envs]
             if self.stage == Agent.TrainStage.explore:
                 acts, act_idxs = self.single_step_predict(
                     obs,
@@ -1615,25 +1712,24 @@ class Agent(L.LightningModule):
                     act, act_idx = single_step_useful_only_predict(ob, 0.1)
                     acts.append(act)
                     act_idxs.append(act_idx)
-            rewards, dones, next_states = self.envs.step(acts)
+            rewards, dones, _ = self.envs.step(acts)
             self.buffer.append(
-                obs,
+                graphs,
                 act_idxs,
                 rewards,
                 dones,
-                next_states,
+                [g.copy() for g in self.envs.envs],
             )
 
     def encode_stage(self, items: list[SequenceReplayItem], opt: LightningOptimizer):
-        graphs = [
-            build_graph(obs.feature) for obs in sum([item.states for item in items], [])
-        ]
+        obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
+        graphs = [build_graph(o.feature) for o in chain(*obs)]
         batched_graph = Batch.from_data_list(graphs).to(self.device)
 
-        next_graphs = [
-            build_graph(obs.feature)
-            for obs in sum([item.next_states for item in items], [])
+        next_obs = [
+            [Observation.from_env(g) for g in item.next_graphs] for item in items
         ]
+        next_graphs = [build_graph(o.feature) for o in chain(*next_obs)]
         batched_next_graph = Batch.from_data_list(next_graphs).to(self.device)
 
         (
@@ -1655,11 +1751,11 @@ class Agent(L.LightningModule):
 
         offsets = get_offsets(batched_graph)
         mappers = sum(
-            [[state.mapper for state in item.states] for item in items],
+            [[o.mapper for o in os] for os in obs],
             [],
         )
         actions = sum(
-            [[state.action_list for state in item.states] for item in items],
+            [[o.action_list for o in os] for os in obs],
             [],
         )
         types = [[action.action_type for action in actions] for actions in actions]
@@ -1763,57 +1859,57 @@ class Agent(L.LightningModule):
 
         value_prefix_loss = F.mse_loss(pred_value_prefix, target_value_prefix)
 
-        pred_next_states = []
-        prev_states = graph_states[:, 0]
-        for pred_step in range(self.seq_len):
-            action_embs = torch.stack(
-                [
-                    actions_embs[i * self.seq_len + pred_step][
-                        item.action_idxs[pred_step]
-                    ]
-                    for i, item in enumerate(items)
-                ]
-            )
-            new_pred_next_states = self.predictor(prev_states, action_embs)
-            pred_next_states.append(new_pred_next_states)
-            prev_states = new_pred_next_states
-        pred_next_states = torch.stack(pred_next_states, 1)
+        # pred_next_states = []
+        # prev_states = graph_states[:, 0]
+        # for pred_step in range(self.seq_len):
+        #     action_embs = torch.stack(
+        #         [
+        #             actions_embs[i * self.seq_len + pred_step][
+        #                 item.action_idxs[pred_step]
+        #             ]
+        #             for i, item in enumerate(items)
+        #         ]
+        #     )
+        #     new_pred_next_states = self.predictor(prev_states, action_embs)
+        #     pred_next_states.append(new_pred_next_states)
+        #     prev_states = new_pred_next_states
+        # pred_next_states = torch.stack(pred_next_states, 1)
 
-        self.log_dict(
-            {
-                "info/next_state_scale": next_graph_states.abs().mean(),
-                "info/pred_state_scale": pred_next_states.abs().mean(),
-            }
-        )
+        # self.log_dict(
+        #     {
+        #         "info/next_state_scale": next_graph_states.abs().mean(),
+        #         "info/pred_state_scale": pred_next_states.abs().mean(),
+        #     }
+        # )
 
-        pred_state_sim_losses = -torch.stack(
-            [
-                F.cosine_similarity(p, n, -1).mean()
-                for p, n in zip(
-                    torch.unbind(pred_next_states, 1),
-                    torch.unbind(next_graph_states, 1),
-                )
-            ]
-        )
+        # pred_state_sim_losses = -torch.stack(
+        #     [
+        #         F.cosine_similarity(p, n, -1).mean()
+        #         for p, n in zip(
+        #             torch.unbind(pred_next_states, 1),
+        #             torch.unbind(next_graph_states, 1),
+        #         )
+        #     ]
+        # )
 
-        pred_state_sim_loss = torch.mean(pred_state_sim_losses)
+        # pred_state_sim_loss = torch.mean(pred_state_sim_losses)
 
-        self.log_dict(
-            {f"info/pred_sim_{i}": v for i, v in enumerate(pred_state_sim_losses)}
-        )
+        # self.log_dict(
+        #     {f"info/pred_sim_{i}": v for i, v in enumerate(pred_state_sim_losses)}
+        # )
 
-        pred_state_mse_losses = torch.stack(
-            [
-                F.mse_loss(p, n)
-                for p, n in zip(
-                    torch.unbind(pred_next_states, 1),
-                    torch.unbind(next_graph_states, 1),
-                )
-            ]
-        )
-        self.log_dict(
-            {f"info/pred_mse_{i}": v for i, v in enumerate(pred_state_mse_losses)}
-        )
+        # pred_state_mse_losses = torch.stack(
+        #     [
+        #         F.mse_loss(p, n)
+        #         for p, n in zip(
+        #             torch.unbind(pred_next_states, 1),
+        #             torch.unbind(next_graph_states, 1),
+        #         )
+        #     ]
+        # )
+        # self.log_dict(
+        #     {f"info/pred_mse_{i}": v for i, v in enumerate(pred_state_mse_losses)}
+        # )
 
         opt.zero_grad()
         self.manual_backward(
@@ -1822,14 +1918,14 @@ class Agent(L.LightningModule):
             + type_diff_loss
             + action_diff_loss
             + value_prefix_loss
-            + pred_state_sim_loss
+            # + pred_state_sim_loss
         )
         clip_grad_norm_(self.extractor.parameters(), 0.5)
         clip_grad_norm_(self.action_encoder.parameters(), 0.5)
         clip_grad_norm_(self.action_decoder.parameters(), 0.5)
         clip_grad_norm_(self.value_net.parameters(), 0.5)
         clip_grad_norm_(self.value_prefix_net.parameters(), 0.5)
-        clip_grad_norm_(self.predictor.parameters(), 0.5)
+        # clip_grad_norm_(self.predictor.parameters(), 0.5)
         opt.step()
 
         self.log_dict(
@@ -1839,23 +1935,21 @@ class Agent(L.LightningModule):
                 "loss/type_diff": type_diff_loss,
                 "loss/action_diff": action_diff_loss,
                 "loss/value_prefix": value_prefix_loss,
-                "loss/pred_state_sim": pred_state_sim_loss,
+                # "loss/pred_state_sim": pred_state_sim_loss,
             }
         )
 
     def value_stage(self, items: list[SequenceReplayItem], opt: LightningOptimizer):
         self.eval()
         with torch.no_grad():
-            graphs = [
-                build_graph(obs.feature)
-                for obs in sum([item.states for item in items], [])
-            ]
+            obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
+            graphs = [build_graph(o.feature) for o in chain(*obs)]
             batched_graph = Batch.from_data_list(graphs).to(self.device)
 
-            next_graphs = [
-                build_graph(obs.feature)
-                for obs in sum([item.next_states for item in items], [])
+            next_obs = [
+                [Observation.from_env(g) for g in item.next_graphs] for item in items
             ]
+            next_graphs = [build_graph(o.feature) for o in chain(*next_obs)]
             batched_next_graph = Batch.from_data_list(next_graphs).to(self.device)
 
             graph_states = self.extractor(batched_graph)[2]
@@ -1881,141 +1975,145 @@ class Agent(L.LightningModule):
 
         opt.zero_grad()
         self.manual_backward(value_loss)
-        clip_grad_norm_(self.value_net.parameters(), 0.5)
+        # clip_grad_norm_(self.value_net.parameters(), 0.5)
         opt.step()
 
-    def generate_stage(
-        self,
-        items: list[SequenceReplayItem],
-        dis_opt: LightningOptimizer,
-        gen_opt: LightningOptimizer,
-    ):
-        self.eval()
-        with torch.no_grad():
-            graphs = [
-                build_graph(obs.feature)
-                for obs in sum([item.states for item in items], [])
-            ]
-            batched_graph = Batch.from_data_list(graphs).to(self.device)
+        eps = 0.005
+        for t, n in zip(self.value_target.parameters(), self.value_net.parameters()):
+            t.data.copy_(t.data * (1 - eps) + n.data * eps)
 
-            (
-                node_states,
-                _,
-                graph_states,
-            ) = self.extractor(batched_graph)
+    # def generate_stage(
+    #     self,
+    #     items: list[SequenceReplayItem],
+    #     dis_opt: LightningOptimizer,
+    #     gen_opt: LightningOptimizer,
+    # ):
+    #     self.eval()
+    #     with torch.no_grad():
+    #         graphs = [
+    #             build_graph(obs.feature)
+    #             for obs in sum([item.states for item in items], [])
+    #         ]
+    #         batched_graph = Batch.from_data_list(graphs).to(self.device)
 
-            offsets = get_offsets(batched_graph)
-            mappers = sum(
-                [[state.mapper for state in item.states] for item in items],
-                [],
-            )
-            actions = sum(
-                [[state.action_list for state in item.states] for item in items],
-                [],
-            )
+    #         (
+    #             node_states,
+    #             _,
+    #             graph_states,
+    #         ) = self.extractor(batched_graph)
 
-            actions_embs = self.action_encoder(
-                actions,
-                node_states,
-                offsets,
-                mappers,
-            )
-        self.train()
+    #         offsets = get_offsets(batched_graph)
+    #         mappers = sum(
+    #             [[state.mapper for state in item.states] for item in items],
+    #             [],
+    #         )
+    #         actions = sum(
+    #             [[state.action_list for state in item.states] for item in items],
+    #             [],
+    #         )
 
-        # wasserstein
+    #         actions_embs = self.action_encoder(
+    #             actions,
+    #             node_states,
+    #             offsets,
+    #             mappers,
+    #         )
+    #     self.train()
 
-        for _ in range(5):
-            true_action_embs = torch.stack(
-                [emb[np.random.randint(emb.size(0))] for emb in actions_embs]
-            )
+    #     # wasserstein
 
-            with torch.no_grad():
-                gen_action_embs = self.action_generator.train_generate(graph_states)
+    #     for _ in range(5):
+    #         true_action_embs = torch.stack(
+    #             [emb[np.random.randint(emb.size(0))] for emb in actions_embs]
+    #         )
 
-            e = torch.rand(true_action_embs.size(0), 1).to(self.device)
-            mixed_action_embs = (
-                true_action_embs * e + gen_action_embs * (1 - e)
-            ).requires_grad_()
+    #         with torch.no_grad():
+    #             gen_action_embs = self.action_generator.train_generate(graph_states)
 
-            dis_true, dis_gen, dis_mix = torch.chunk(
-                self.action_generator.discriminate(
-                    repeat(graph_states, "b s -> (r b) s", r=3),
-                    torch.cat([true_action_embs, gen_action_embs, mixed_action_embs]),
-                ),
-                3,
-            )
+    #         e = torch.rand(true_action_embs.size(0), 1).to(self.device)
+    #         mixed_action_embs = (
+    #             true_action_embs * e + gen_action_embs * (1 - e)
+    #         ).requires_grad_()
 
-            grads = torch.autograd.grad(
-                dis_mix,
-                mixed_action_embs,
-                torch.ones_like(dis_mix),
-                True,
-                True,
-            )[0]
+    #         dis_true, dis_gen, dis_mix = torch.chunk(
+    #             self.action_generator.discriminate(
+    #                 repeat(graph_states, "b s -> (r b) s", r=3),
+    #                 torch.cat([true_action_embs, gen_action_embs, mixed_action_embs]),
+    #             ),
+    #             3,
+    #         )
 
-            n = torch.norm(grads, 2, 1)
-            gp = (n - 0.5) ** 2
+    #         grads = torch.autograd.grad(
+    #             dis_mix,
+    #             mixed_action_embs,
+    #             torch.ones_like(dis_mix),
+    #             True,
+    #             True,
+    #         )[0]
 
-            d_loss = torch.mean(dis_gen - dis_true + 80 * gp)
+    #         n = torch.norm(grads, 2, 1)
+    #         gp = (n - 0.5) ** 2
 
-            dis_opt.zero_grad()
-            self.manual_backward(d_loss)
-            # clip_grad_norm_(self.action_generator.discriminator.parameters(), 0.5)
-            dis_opt.step()
+    #         d_loss = torch.mean(dis_gen - dis_true + 80 * gp)
 
-            self.log_dict(
-                {
-                    "info/norm_min": n.min(),
-                    "info/norm_max": n.max(),
-                }
-            )
+    #         dis_opt.zero_grad()
+    #         self.manual_backward(d_loss)
+    #         # clip_grad_norm_(self.action_generator.discriminator.parameters(), 0.5)
+    #         dis_opt.step()
 
-            self.log_dict(
-                {
-                    "loss/dis_gen": torch.mean(dis_gen),
-                    "loss/dis_true": torch.mean(dis_true),
-                    "loss/gp": torch.mean(gp),
-                    "loss/critic": d_loss,
-                }
-            )
+    #         self.log_dict(
+    #             {
+    #                 "info/norm_min": n.min(),
+    #                 "info/norm_max": n.max(),
+    #             }
+    #         )
 
-        gens = self.action_generator.train_generate(graph_states)
+    #         self.log_dict(
+    #             {
+    #                 "loss/dis_gen": torch.mean(dis_gen),
+    #                 "loss/dis_true": torch.mean(dis_true),
+    #                 "loss/gp": torch.mean(gp),
+    #                 "loss/critic": d_loss,
+    #             }
+    #         )
 
-        g_loss = -torch.mean(self.action_generator.discriminate(graph_states, gens))
-        self.log("loss/gen", g_loss)
+    #     gens = self.action_generator.train_generate(graph_states)
 
-        g_sim = torch.mean(
-            torch.stack(
-                [
-                    torch.min(((gen - true) ** 2).mean(-1))
-                    for gen, true in zip(gens, actions_embs)
-                ]
-            )
-        )
-        self.log("info/g_sim", g_sim)
+    #     g_loss = -torch.mean(self.action_generator.discriminate(graph_states, gens))
+    #     self.log("loss/gen", g_loss)
 
-        gen_opt.zero_grad()
-        self.manual_backward(g_loss)
-        gen_opt.step()
+    #     g_sim = torch.mean(
+    #         torch.stack(
+    #             [
+    #                 torch.min(((gen - true) ** 2).mean(-1))
+    #                 for gen, true in zip(gens, actions_embs)
+    #             ]
+    #         )
+    #     )
+    #     self.log("info/g_sim", g_sim)
 
-        self.eval()
-        with torch.no_grad():
-            true_values = [
-                self.value_net(self.predictor(state, actions))
-                for state, actions in zip(graph_states, actions_embs)
-            ]
-            gen_values = self.value_net(self.predictor(graph_states, gens))
-        self.train()
+    #     gen_opt.zero_grad()
+    #     self.manual_backward(g_loss)
+    #     gen_opt.step()
 
-        value_sim = torch.mean(
-            torch.stack(
-                [
-                    torch.min((gen - true) ** 2)
-                    for gen, true in zip(gen_values, true_values)
-                ]
-            )
-        )
-        self.log("info/value_sim", value_sim)
+    #     self.eval()
+    #     with torch.no_grad():
+    #         true_values = [
+    #             self.value_net(self.predictor(state, actions))
+    #             for state, actions in zip(graph_states, actions_embs)
+    #         ]
+    #         gen_values = self.value_net(self.predictor(graph_states, gens))
+    #     self.train()
+
+    #     value_sim = torch.mean(
+    #         torch.stack(
+    #             [
+    #                 torch.min((gen - true) ** 2)
+    #                 for gen, true in zip(gen_values, true_values)
+    #             ]
+    #         )
+    #     )
+    #     self.log("info/value_sim", value_sim)
 
     def policy_stage(
         self,
@@ -2025,12 +2123,9 @@ class Agent(L.LightningModule):
     ):
         self.eval()
         with torch.no_grad():
-            graphs = [
-                build_graph(obs.feature)
-                for obs in sum([item.states for item in items], [])
-            ]
+            obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
+            graphs = [build_graph(o.feature) for o in chain(*obs)]
             batched_graph = Batch.from_data_list(graphs).to(self.device)
-
             (
                 node_states,
                 _,
@@ -2039,11 +2134,11 @@ class Agent(L.LightningModule):
 
             offsets = get_offsets(batched_graph)
             mappers = sum(
-                [[state.mapper for state in item.states] for item in items],
+                [[o.mapper for o in os] for os in obs],
                 [],
             )
             actions = sum(
-                [[state.action_list for state in item.states] for item in items],
+                [[o.action_list for o in os] for os in obs],
                 [],
             )
 
@@ -2053,20 +2148,15 @@ class Agent(L.LightningModule):
                 offsets,
                 mappers,
             )
-            self.mcts.value_net = self.value_target
-            self.mcts.policy_net = self.policy_target
             (
                 _,
                 target_value,
                 target_policy,
             ) = self.mcts.search(
-                graph_states,
-                actions_embs,
+                sum([item.graphs for item in items], []),
                 self.root_sample_count,
                 self.simulation_count,
             )
-            self.mcts.value_net = self.value_net
-            self.mcts.policy_net = self.policy_net
         self.train()
 
         pred_value = self.value_net(graph_states)
@@ -2088,7 +2178,7 @@ class Agent(L.LightningModule):
         policy_loss = torch.mean(
             torch.stack(
                 [
-                    F.cosine_similarity(pred, target, dim=0)
+                    F.kl_div(torch.log(target), pred, reduction="batchmean")
                     for pred, target in zip(pred_policy, target_policy)
                 ]
             )
@@ -2107,6 +2197,12 @@ class Agent(L.LightningModule):
         p_opt.zero_grad()
         self.manual_backward(policy_loss)
         p_opt.step()
+
+        eps = 0.005
+        for t, n in zip(self.value_target.parameters(), self.value_net.parameters()):
+            t.data.copy_(t.data * (1 - eps) + n.data * eps)
+        for t, n in zip(self.policy_target.parameters(), self.policy_net.parameters()):
+            t.data.copy_(t.data * (1 - eps) + n.data * eps)
 
     def explore_stage(self, items: list[SequenceReplayItem], opt: LightningOptimizer):
         self.eval()
@@ -2187,16 +2283,16 @@ class Agent(L.LightningModule):
         (
             encode_stage_opt,
             value_stage_opt,
-            discriminator_opt,
-            generator_opt,
+            # discriminator_opt,
+            # generator_opt,
             policy_opt,
             explore_opt,
         ) = self.optimizers()
         (
             encode_stage_sch,
             value_stage_sch,
-            discriminator_sch,
-            generator_sch,
+            # discriminator_sch,
+            # generator_sch,
             policy_sch,
             explore_sch,
         ) = self.lr_schedulers()
@@ -2208,10 +2304,10 @@ class Agent(L.LightningModule):
                 self.value_stage(items, value_stage_opt)
                 value_stage_sch.step()
                 pass
-            case Agent.TrainStage.generate:
-                self.generate_stage(items, discriminator_opt, generator_opt)
-                # discriminator_sch.step()
-                # generator_sch.step()
+            # case Agent.TrainStage.generate:
+            #     self.generate_stage(items, discriminator_opt, generator_opt)
+            # discriminator_sch.step()
+            # generator_sch.step()
             case Agent.TrainStage.policy:
                 self.policy_stage(items, value_stage_opt, policy_opt)
             case Agent.TrainStage.explore:
@@ -2222,47 +2318,38 @@ class Agent(L.LightningModule):
         self.play_step()
         self.train()
 
-    def on_train_epoch_end(self):
-        match self.stage:
-            case Agent.TrainStage._value:
-                if (self.current_epoch + 1) % 3 == 0:
-                    self.value_target.load_state_dict(self.value_net.state_dict())
-            case Agent.TrainStage.policy:
-                if (self.current_epoch + 1) % 3 == 0:
-                    self.value_target.load_state_dict(self.value_net.state_dict())
-                    self.policy_target.load_state_dict(self.policy_net.state_dict())
-
     @torch.no_grad
     def single_step_predict(
-        self, obs: list[Observation], sample_count: int, sim_count: int
+        self, graphs: list[Graph], sample_count: int, sim_count: int
     ):
-        batched_graph = Batch.from_data_list(
-            [build_graph(ob.feature) for ob in obs]
-        ).to(self.device)
+        obs = [Observation.from_env(g) for g in graphs]
 
-        (
-            node_states,
-            _,
-            graph_states,
-        ) = self.extractor(batched_graph)
+        # batched_graph = Batch.from_data_list(
+        #     [build_graph(ob.feature) for ob in obs]
+        # ).to(self.device)
 
-        offsets = get_offsets(batched_graph)
-        mappers = [ob.mapper for ob in obs]
-        action_lists = [ob.action_list for ob in obs]
+        # (
+        #     node_states,
+        #     _,
+        #     graph_states,
+        # ) = self.extractor(batched_graph)
 
-        action_embs = self.action_encoder(
-            action_lists,
-            node_states,
-            offsets,
-            mappers,
-        )
+        # offsets = get_offsets(batched_graph)
+        # mappers = [ob.mapper for ob in obs]
+        # action_lists = [ob.action_list for ob in obs]
+
+        # action_embs = self.action_encoder(
+        #     action_lists,
+        #     node_states,
+        #     offsets,
+        #     mappers,
+        # )
         (
             act_idxs,
             _,
             _,
         ) = self.mcts.search(
-            graph_states,
-            action_embs,
+            graphs,
             sample_count,
             sim_count,
         )
@@ -2275,13 +2362,11 @@ class Agent(L.LightningModule):
         sample_count: int,
         sim_count: int,
     ):
-        env = Environment.from_graphs([graph])
+        env = Environment.from_graphs([graph], True)
 
         for round_count in count(1):
-            obs = env.observe()
-
             actions, _ = self.single_step_predict(
-                obs,
+                [graph],
                 sample_count,
                 sim_count,
             )
@@ -2305,152 +2390,154 @@ class Agent(L.LightningModule):
     def validation_step(self, batch: list[Graph]):
         match self.stage:
             case Agent.TrainStage._value:
-                obs = Environment.from_graphs(
-                    [graph.copy() for graph in batch]
-                ).observe()
-                batched_graph = Batch.from_data_list(
-                    [build_graph(ob.feature) for ob in obs]
-                ).to(self.device)
+                pass
+                # obs = Environment.from_graphs(
+                #     [graph.copy() for graph in batch], True
+                # ).observe()
+                # batched_graph = Batch.from_data_list(
+                #     [build_graph(ob.feature) for ob in obs]
+                # ).to(self.device)
 
-                (
-                    node_states,
-                    type_states,
-                    graph_states,
-                ) = self.extractor(batched_graph)
+                # (
+                #     node_states,
+                #     type_states,
+                #     graph_states,
+                # ) = self.extractor(batched_graph)
 
-                offsets = get_offsets(batched_graph)
-                mappers = [ob.mapper for ob in obs]
-                action_lists = [ob.action_list for ob in obs]
-                action_embs = self.action_encoder(
-                    action_lists,
-                    node_states,
-                    offsets,
-                    mappers,
-                )
-                action_types = [
-                    [action.action_type.value for action in ob.action_list]
-                    for ob in obs
-                ]
-                stack_action_embs, ps = pack(action_embs, "* a")
-                repeated_states, _ = pack(
-                    [
-                        repeat(states, "s -> a s", a=p[0])
-                        for states, p in zip(graph_states, ps)
-                    ],
-                    "* s",
-                )
-                pred_next_states = self.predictor(repeated_states, stack_action_embs)
-                pred_rewards = self.value_prefix_net(
-                    torch.stack([repeated_states, pred_next_states], 1), None
-                )[0][:, 1]
-                values = self.value_net(pred_next_states)
-                for i, (ts, rs, vs) in enumerate(
-                    zip(
-                        action_types,
-                        unpack(pred_rewards, ps, "*"),
-                        unpack(values, ps, "*"),
-                    )
-                ):
-                    type_Qs: dict[int, list[float]] = {}
-                    for t, r, v in zip(ts, rs, vs, strict=True):
-                        type_Qs.setdefault(t, []).append(r.item() + v.item())
-                    self.log_dict(
-                        {
-                            f"val/env_{i}_pick_Q": np.mean(
-                                type_Qs[ActionType.pick.value]
-                            ),
-                            f"val/env_{i}_move_Q": np.mean(
-                                type_Qs[ActionType.move.value]
-                            ),
-                        },
-                        batch_size=len(batch),
-                    )
-            case Agent.TrainStage.generate:
-                env = Environment.from_graphs([graph.copy() for graph in batch])
-                for _ in range(np.random.randint(30)):
-                    obs = env.observe()
-                    acts = []
-                    act_idxs = []
-                    for ob in obs:
-                        act, act_idx = single_step_useful_only_predict(ob, 0.1)
-                        acts.append(act)
-                        act_idxs.append(act_idx)
-                    env.step(acts)
+                # offsets = get_offsets(batched_graph)
+                # mappers = [ob.mapper for ob in obs]
+                # action_lists = [ob.action_list for ob in obs]
+                # action_embs = self.action_encoder(
+                #     action_lists,
+                #     node_states,
+                #     offsets,
+                #     mappers,
+                # )
+                # action_types = [
+                #     [action.action_type.value for action in ob.action_list]
+                #     for ob in obs
+                # ]
+                # stack_action_embs, ps = pack(action_embs, "* a")
+                # repeated_states, _ = pack(
+                #     [
+                #         repeat(states, "s -> a s", a=p[0])
+                #         for states, p in zip(graph_states, ps)
+                #     ],
+                #     "* s",
+                # )
+                # pred_next_states = self.predictor(repeated_states, stack_action_embs)
+                # pred_rewards = self.value_prefix_net(
+                #     torch.stack([repeated_states, pred_next_states], 1), None
+                # )[0][:, 1]
+                # values = self.value_net(pred_next_states)
+                # for i, (ts, rs, vs) in enumerate(
+                #     zip(
+                #         action_types,
+                #         unpack(pred_rewards, ps, "*"),
+                #         unpack(values, ps, "*"),
+                #     )
+                # ):
+                #     type_Qs: dict[int, list[float]] = {}
+                #     for t, r, v in zip(ts, rs, vs, strict=True):
+                #         type_Qs.setdefault(t, []).append(r.item() + v.item())
+                #     self.log_dict(
+                #         {
+                #             f"val/env_{i}_pick_Q": np.mean(
+                #                 type_Qs[ActionType.pick.value]
+                #             ),
+                #             f"val/env_{i}_move_Q": np.mean(
+                #                 type_Qs[ActionType.move.value]
+                #             ),
+                #         },
+                #         batch_size=len(batch),
+                #     )
+            # case Agent.TrainStage.generate:
+            #     env = Environment.from_graphs([graph.copy() for graph in batch])
+            #     for _ in range(np.random.randint(30)):
+            #         obs = env.observe()
+            #         acts = []
+            #         act_idxs = []
+            #         for ob in obs:
+            #             act, act_idx = single_step_useful_only_predict(ob, 0.1)
+            #             acts.append(act)
+            #             act_idxs.append(act_idx)
+            #         env.step(acts)
 
-                obs = env.observe()
-                batched_graph = Batch.from_data_list(
-                    [build_graph(ob.feature) for ob in obs]
-                ).to(self.device)
-                (
-                    node_states,
-                    _,
-                    graph_states,
-                ) = self.extractor(batched_graph)
-                offsets = get_offsets(batched_graph)
-                mappers = [ob.mapper for ob in obs]
-                action_lists = [ob.action_list for ob in obs]
-                action_embs = self.action_encoder(
-                    action_lists,
-                    node_states,
-                    offsets,
-                    mappers,
-                )
-                stack_action_embs, ps = pack(action_embs, "* a")
-                repeated_states, _ = pack(
-                    [
-                        repeat(states, "s -> a s", a=p[0])
-                        for states, p in zip(graph_states, ps)
-                    ],
-                    "* s",
-                )
-                true_pred_next_states = self.predictor(
-                    repeated_states, stack_action_embs
-                )
-                true_pred_rewards = self.value_prefix_net(
-                    torch.stack([repeated_states, true_pred_next_states], 1), None
-                )[0][:, 1]
-                true_pred_values = self.value_net(true_pred_next_states)
-                for i, t_Q in enumerate(
-                    unpack(true_pred_rewards + true_pred_values, ps, "*"),
-                ):
-                    self.log(
-                        f"val/env_{i}_true_Q",
-                        torch.mean(t_Q),
-                        batch_size=len(batch),
-                    )
+            #     obs = env.observe()
+            #     batched_graph = Batch.from_data_list(
+            #         [build_graph(ob.feature) for ob in obs]
+            #     ).to(self.device)
+            #     (
+            #         node_states,
+            #         _,
+            #         graph_states,
+            #     ) = self.extractor(batched_graph)
+            #     offsets = get_offsets(batched_graph)
+            #     mappers = [ob.mapper for ob in obs]
+            #     action_lists = [ob.action_list for ob in obs]
+            #     action_embs = self.action_encoder(
+            #         action_lists,
+            #         node_states,
+            #         offsets,
+            #         mappers,
+            #     )
+            #     stack_action_embs, ps = pack(action_embs, "* a")
+            #     repeated_states, _ = pack(
+            #         [
+            #             repeat(states, "s -> a s", a=p[0])
+            #             for states, p in zip(graph_states, ps)
+            #         ],
+            #         "* s",
+            #     )
+            #     true_pred_next_states = self.predictor(
+            #         repeated_states, stack_action_embs
+            #     )
+            #     true_pred_rewards = self.value_prefix_net(
+            #         torch.stack([repeated_states, true_pred_next_states], 1), None
+            #     )[0][:, 1]
+            #     true_pred_values = self.value_net(true_pred_next_states)
+            #     for i, t_Q in enumerate(
+            #         unpack(true_pred_rewards + true_pred_values, ps, "*"),
+            #     ):
+            #         self.log(
+            #             f"val/env_{i}_true_Q",
+            #             torch.mean(t_Q),
+            #             batch_size=len(batch),
+            #         )
 
-                gen_actions = rearrange(
-                    self.action_generator.generate(graph_states), "b o s -> (b o) s"
-                )
-                repeated_states = repeat(
-                    graph_states, "b s -> (b o) s", o=self.action_generator.out_num
-                )
-                gen_pred_next_states = self.predictor(repeated_states, gen_actions)
-                gen_pred_rewards = self.value_prefix_net(
-                    torch.stack([repeated_states, gen_pred_next_states], 1), None
-                )[0][:, 1]
-                gen_pred_values = self.value_net(gen_pred_next_states)
-                for i, g_Q in enumerate(
-                    torch.chunk(
-                        gen_pred_rewards + gen_pred_values, graph_states.size(0)
-                    )
-                ):
-                    self.log(
-                        f"val/env_{i}_gen_Q",
-                        torch.mean(g_Q),
-                        batch_size=len(batch),
-                    )
+            #     gen_actions = rearrange(
+            #         self.action_generator.generate(graph_states), "b o s -> (b o) s"
+            #     )
+            #     repeated_states = repeat(
+            #         graph_states, "b s -> (b o) s", o=self.action_generator.out_num
+            #     )
+            #     gen_pred_next_states = self.predictor(repeated_states, gen_actions)
+            #     gen_pred_rewards = self.value_prefix_net(
+            #         torch.stack([repeated_states, gen_pred_next_states], 1), None
+            #     )[0][:, 1]
+            #     gen_pred_values = self.value_net(gen_pred_next_states)
+            #     for i, g_Q in enumerate(
+            #         torch.chunk(
+            #             gen_pred_rewards + gen_pred_values, graph_states.size(0)
+            #         )
+            #     ):
+            #         self.log(
+            #             f"val/env_{i}_gen_Q",
+            #             torch.mean(g_Q),
+            #             batch_size=len(batch),
+            #         )
 
             case Agent.TrainStage.policy | Agent.TrainStage.explore:
                 bar: tqdm = self.trainer.progress_bar_callback.val_progress_bar
-                for sample_count, sim_count in [(1, 0), (4, 20), (8, 40)]:
+                for sample_count, sim_count in [(1, 0), (4, 8)]:
                     bar.set_description(f"Validation [{sample_count}/{sim_count}]")
                     env = Environment.from_graphs(
                         [
                             graph.copy()
                             for graph in batch
                             for _ in range(self.val_predict_num)
-                        ]
+                        ],
+                        True,
                     )
                     while any(
                         [
@@ -2466,7 +2553,7 @@ class Agent(L.LightningModule):
                             break
 
                         actions, _ = self.single_step_predict(
-                            obs,
+                            [g for g in env.envs if not g.finished()],
                             sample_count,
                             sim_count,
                         )

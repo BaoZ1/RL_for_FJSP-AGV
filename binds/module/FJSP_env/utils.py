@@ -115,29 +115,39 @@ class Environment:
         self.reset()
 
     @staticmethod
-    def from_graphs(graphs: list[Graph]):
+    def from_graphs(graphs: list[Graph], reset: bool = False):
         env = Environment(0, [], False)
-        env.reset(graphs)
+        env.set_graphs(graphs)
+        if reset:
+            env.reset(True)
         return env
 
-    def reset(self, envs: list[Graph] | None = None):
+    def set_graphs(self, graphs: list[Graph]):
         self.envs.clear()
         self.prev_lbs.clear()
-        if envs is not None:
-            self.count = len(envs)
+        self.count = len(graphs)
         for i in range(self.count):
-            if envs:
-                new_env = envs[i].reset().init()
-            else:
-                new_env = self.generate_new().init()
+            new_env = graphs[i].copy()
             self.envs.append(new_env)
             self.prev_lbs.append(new_env.finish_time_lower_bound())
+
+    def reset(self, keep_graphs: bool = False):
+        if not keep_graphs:
+            self.envs.clear()
+        self.prev_lbs.clear()
+        for i in range(self.count):
+            if keep_graphs:
+                self.envs[i] = self.envs[i].reset().init()
+            else:
+                self.envs.append(self.generate_new().init())
+            self.prev_lbs.append(self.envs[i].finish_time_lower_bound())
 
     def generate_new(self) -> Graph:
         for try_num in count():
             param_idx = np.random.choice(
                 len(self.generate_params),
-                p=(1 / self.params_total_task_count) / np.sum(1 / self.params_total_task_count),
+                p=(1 / self.params_total_task_count)
+                / np.sum(1 / self.params_total_task_count),
             )
             new_env = Graph.rand_generate(self.generate_params[param_idx])
             if self.test(new_env):
@@ -173,6 +183,7 @@ class Environment:
         dones = []
         action_idx = 0
         ret_envs = []
+        assert sum([not g.finished() for g in self.envs]) == len(actions)
         for i, (env, prev_lb) in enumerate(zip(self.envs, self.prev_lbs)):
             if env.finished():
                 continue
@@ -182,7 +193,12 @@ class Environment:
                 reward += 5
             # elif action.action_type == ActionType.move:
             #     reward += -0.05
-            new_env = env.act(action)
+            try:
+                new_env = env.act(action)
+            except Exception as e:
+                print(e)
+                print(env)
+                print(action)
             if (
                 auto_wait
                 and len(new_actions := new_env.get_available_actions()) == 1
