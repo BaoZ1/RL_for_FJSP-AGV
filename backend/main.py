@@ -4,7 +4,7 @@ from typing import Annotated
 import uvicorn
 from pathlib import Path
 from models import *
-from FJSP_env import *
+from fjsp_env import *
 
 
 def script_method(fn, _rcb=None):
@@ -20,7 +20,8 @@ import torch.jit
 torch.jit.script_method = script_method
 torch.jit.script = script
 
-from FJSP_model.modules import Agent, Model
+from fjsp_model.modules import Agent, Model
+from fjsp_model.utils import simple_predict, single_step_useful_first_predict, single_step_useful_only_predict
 
 
 import torch.cuda

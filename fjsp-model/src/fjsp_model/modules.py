@@ -3,23 +3,13 @@ from torch import nn, Tensor, tensor
 from torch.nn import functional as F
 from torch import optim
 from torch.optim import lr_scheduler
-from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch_geometric import nn as gnn
 from torch_geometric.data import Batch
 from torch_geometric.utils.hetero import check_add_self_loops
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
-from FJSP_env import (
-    Graph,
-    Environment,
-    Action,
-    ActionType,
-    IdIdxMapper,
-    Observation,
-    single_step_useful_only_predict,
-    single_step_useful_first_predict,
-)
+from fjsp_env import Graph, Action, ActionType, IdIdxMapper
 from .utils import *
 import lightning as L
 from lightning.pytorch.core.optimizer import LightningOptimizer
@@ -930,7 +920,7 @@ class Node:
             sigma_Qs = (sigma_Qs - sigma_Qs.mean()) / sigma_Qs.std()
         else:
             sigma_Qs = sigma_Qs - sigma_Qs.mean()
-        
+
         return F.softmax(logits + sigma_Qs, 0)
 
     def select_action(self):
@@ -1853,17 +1843,23 @@ class Agent(L.LightningModule):
                 l=self.seq_len,
             )
 
-            last_obs = [
-                Observation.from_env(item.next_graphs[-1]) for item in items
-            ]
+            last_obs = [Observation.from_env(item.next_graphs[-1]) for item in items]
             last_graphs = [build_graph(o.feature) for o in last_obs]
             batched_last_graph = Batch.from_data_list(last_graphs).to(self.device)
-            last_graph_states = self.model.extractor.train_forward(batched_last_graph)[2]
+            last_graph_states = self.model.extractor.train_forward(batched_last_graph)[
+                2
+            ]
 
-            dones = tensor([item.dones[-1] for item in items], dtype=torch.float, device=self.device)
+            dones = tensor(
+                [item.dones[-1] for item in items],
+                dtype=torch.float,
+                device=self.device,
+            )
             target_value = self.value_target(last_graph_states) * dones
             for i in reversed(range(self.seq_len)):
-                target_value += tensor([item.rewards[i] for item in items], device=self.device)
+                target_value += tensor(
+                    [item.rewards[i] for item in items], device=self.device
+                )
         self.train()
 
         pred_value = self.model.value_net(graph_states[:, 0])
@@ -1874,9 +1870,7 @@ class Agent(L.LightningModule):
             }
         )
         opt.zero_grad()
-        self.manual_backward(
-            value_loss / value_loss.detach().abs()
-        )
+        self.manual_backward(value_loss / value_loss.detach().abs())
         self.value_net_norm_clipper.clip()
         self.policy_net_norm_clipper.clip()
         opt.step()

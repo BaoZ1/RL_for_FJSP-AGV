@@ -1,0 +1,15 @@
+[project]
+name = "backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.11",
+    "fjsp-env>=0.1.0",
+    "fjsp-model>=0.1.0",
+    "pyinstaller>=6.12.0",
+    "uvicorn>=0.34.0",
+]
+
+[tool.uv.sources]
+fjsp-env = { path = "../fjsp-env" }
+fjsp-model = { path = "../fjsp-model" }

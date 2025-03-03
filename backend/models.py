@@ -9,7 +9,7 @@ from pydantic import (
     PlainSerializer,
     ValidationInfo,
 )
-from FJSP_env import *
+from fjsp_env import *
 from typing import Annotated
 
 class OperationState(BaseModel):

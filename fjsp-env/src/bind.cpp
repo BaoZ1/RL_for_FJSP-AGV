@@ -7,7 +7,7 @@
 namespace py = pybind11;
 using namespace py::literals;
 
-PYBIND11_MODULE(FJSP_env, m)
+PYBIND11_MODULE(_core, m)
 {
     py::enum_<OperationStatus>(m, "OperationStatus")
         .value("blocked", OperationStatus::blocked)

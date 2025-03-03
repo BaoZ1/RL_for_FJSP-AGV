@@ -3,7 +3,7 @@ from itertools import count
 import onnxruntime
 from pathlib import Path
 import numpy as np
-from FJSP_env import Graph, Action, ActionType, GraphFeature, IdIdxMapper
+from fjsp_env import Graph, Action, ActionType, GraphFeature, IdIdxMapper
 
 
 class Agent:

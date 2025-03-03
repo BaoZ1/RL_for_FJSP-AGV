@@ -1,5 +1,5 @@
-from .modules import *
-from .utils import Metadata
+from fjsp_model.modules import *
+from fjsp_model.utils import Metadata
 from pathlib import Path
 from torch.export import Dim
 
