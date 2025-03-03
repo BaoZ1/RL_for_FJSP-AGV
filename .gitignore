@@ -24,3 +24,5 @@ backend/dist
 *.code-workspace
 **/lightning_logs
 checkpoints
+**/*.onnx
+**/*.onnx.data

@@ -627,6 +627,7 @@ const MachineEditor: BaseFC<{
 
   const [isDragging, setIsDragging] = useState(false)
 
+
   const trackDrag = (e: MouseEvent) => {
     e.preventDefault()
     let prev_x = e.clientX

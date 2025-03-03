@@ -1,11 +1,4 @@
-from .FJSP_env import (
-    GenerateParam,
-    Graph,
-    Action,
-    ActionType,
-    GraphFeature,
-    IdIdxMapper,
-)
+from .FJSP_env import *
 from dataclasses import dataclass
 from typing import Callable
 from itertools import count
@@ -190,15 +183,22 @@ class Environment:
             reward = 0
             action = actions[action_idx]
             if action.action_type in (ActionType.pick, ActionType.transport):
-                reward += 5
-            # elif action.action_type == ActionType.move:
-            #     reward += -0.05
-            try:
-                new_env = env.act(action)
-            except Exception as e:
-                print(e)
-                print(env)
-                print(action)
+                reward += 3
+            elif action.action_type == ActionType.move:
+                reward += -0.05
+            new_env = env.act(action)
+            if action.action_type == ActionType.wait:
+                for oid in env.get_operations_id():
+                    op = env.get_operation(oid)
+                    new_op = new_env.get_operation(oid)
+                    if new_op.status != op.status:
+                        reward += 0.5
+                        if new_op.status == OperationStatus.processing:
+                            reward += 4
+                        # if new_op.status == OperationStatus.finished:
+                        #     ma = new_env.get_machine(new_op.processing_machine)
+                        #     if ma.status == MachineStatus.working:
+                        #         reward += 2
             if (
                 auto_wait
                 and len(new_actions := new_env.get_available_actions()) == 1

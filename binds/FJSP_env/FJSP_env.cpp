@@ -836,6 +836,39 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     return ret;
 }
 
+vector<OperationId> Graph::operation_topological_sort() const
+{
+    map<OperationId, set<OperationId>> rest_preds;
+    for (const auto &[id, op] : operations)
+    {
+        rest_preds[id] = op->predecessors; // 显式复制前驱集合
+    }
+
+    vector<OperationId> ret;
+    while (!rest_preds.empty())
+    {
+        auto it = rest_preds.begin();
+        while (it != rest_preds.end())
+        {
+            if (it->second.empty())
+            {
+                auto id = it->first;
+                ret.push_back(id);
+                it = rest_preds.erase(it);
+                for (auto &[_, preds] : rest_preds)
+                {
+                    preds.erase(id);
+                }
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+    return ret;
+}
+
 shared_ptr<Graph> Graph::copy() const
 {
     return make_shared<Graph>(*this);
@@ -862,7 +895,7 @@ shared_ptr<Graph> Graph::reset() const
         machine->working_operation = nullopt;
         machine->waiting_operations.clear();
         machine->materials.clear();
-        machine->products.clear();     
+        machine->products.clear();
     }
     for (auto AGV : ret->AGVs | views::values)
     {
@@ -923,6 +956,8 @@ RepeatedTuple<float, Graph::operation_feature_size> Graph::get_operation_feature
         status_is_finished,
         total_process_time,
         rest_process_time,
+        total_material,
+        rest_material,
         total_product,
         rest_pruduct
     };
@@ -1052,8 +1087,10 @@ tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
     }
 
     assert(!this->paths.empty());
-    for (auto [f_id, tos] : this->paths) {
-        for(auto [t_id, data] : tos) {
+    for (auto [f_id, tos] : this->paths)
+    {
+        for (auto [t_id, data] : tos)
+        {
             feature->distance.emplace_back(make_tuple(mapper->machine[f_id], mapper->machine[t_id], get<1>(data)));
         }
     }
@@ -1112,10 +1149,6 @@ float Graph::finish_time_lower_bound() const
     {
         for (auto [tid, to] : this->machines)
         {
-            if (fid == tid)
-            {
-                continue;
-            }
             float distance = get<1>(this->paths.at(fid).at(tid));
             auto [iter, new_add] = min_type_distance.try_emplace({from->type, to->type}, distance);
             if (!new_add)
@@ -1126,46 +1159,133 @@ float Graph::finish_time_lower_bound() const
         type_count.try_emplace(from->type, 0).first->second++;
     }
 
-    for (auto operation : this->operations | views::values)
+    float max_AGV_speed = 0;
+    for (auto agv : this->AGVs | views::values)
     {
+        max_AGV_speed = max(max_AGV_speed, agv->speed);
+    }
 
-        auto [iter, _] = remain_process_time.try_emplace(operation->machine_type, 0.0f);
-        if (operation->status <= OperationStatus::waiting)
+    map<OperationId, float> min_finish_times;
+    for (auto id : this->operation_topological_sort())
+    {
+        auto op = this->operations.at(id);
+        switch (op->status)
         {
-            iter->second += operation->process_time;
-        }
-        else if (operation->status == OperationStatus::processing)
+        case OperationStatus::finished:
+            // min_finish_times.emplace(id, this->timestamp);
+            // break;
+        case OperationStatus::processing:
+            min_finish_times.emplace(id, op->finish_timestamp);
+            break;
+        default:
         {
-            iter->second += operation->finish_timestamp - this->timestamp;
-        }
-
-        set<OperationId> unarrived_pred_ids;
-        ranges::set_difference(operation->predecessors, operation->arrived_preds, inserter(unarrived_pred_ids, unarrived_pred_ids.end()));
-        for (auto unarrived_pred : unarrived_pred_ids | views::transform([this](auto id)
-                                                                         { return this->operations.at(id); }))
-        {
-            if (!unarrived_pred->sent_succs.contains(operation->id))
+            float min_start_time = this->timestamp;
+            for (auto pid : op->predecessors)
             {
-                remain_transport_distance += min_type_distance[{unarrived_pred->machine_type, operation->machine_type}];
+                min_start_time = max(min_start_time, min_finish_times.at(pid));
+                auto pred = this->operations.at(pid);
+                if (pred->sent_succs.contains(id))
+                {
+                    for (auto a : this->AGVs | views::values)
+                    {
+                        if (a->loaded_item == Product{pid, id})
+                        {
+                            if (a->status == AGVStatus::transporting)
+                            {
+                                min_start_time = max(min_start_time, a->finish_timestamp);
+                            }
+                            else
+                            {
+                                // float transport_time;
+                                // if (op->processing_machine.has_value())
+                                // {
+                                //     transport_time = get<1>(this->paths.at(*pred->processing_machine).at(*op->processing_machine)) / a->speed;
+                                // }
+                                // else
+                                // {
+                                //     transport_time = min_type_distance.at({pred->machine_type, op->machine_type}) / a->speed;
+                                // }
+                                // min_start_time = max(min_start_time, this->timestamp + transport_time);
+                            }
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    bool picking = false;
+                    for (auto a : this->AGVs | views::values)
+                    {
+                        if (a->target_item == Product{pid, id})
+                        {
+                            // float pick_time;
+                            // if (op->processing_machine.has_value())
+                            // {
+                            //     pick_time = get<1>(this->paths.at(*pred->processing_machine).at(*op->processing_machine)) / a->speed;
+                            // }
+                            // else
+                            // {
+                            //     pick_time = min_type_distance.at({pred->machine_type, op->machine_type}) / a->speed;
+                            // }
+                            picking = true;
+                            min_start_time = max(min_start_time, a->finish_timestamp);
+                            break;
+                        }
+                    }
+                    if (!picking)
+                    {
+                        // float transport_time = min_type_distance.at({pred->machine_type, op->machine_type}) / max_AGV_speed;
+                        // min_start_time = max(min_start_time, min_finish_times.at(pid) + transport_time);
+                    }
+                }
             }
+            min_finish_times.emplace(id, min_start_time + op->process_time);
+        }
+        break;
         }
     }
+    return min_finish_times.at(this->end_operation_id);
 
-    for (auto AGV : this->AGVs | views::values)
-    {
-        if (AGV->status != AGVStatus::idle)
-        {
-            remain_transport_distance += (AGV->finish_timestamp - this->timestamp) * AGV->speed;
-        }
-    }
+    // for (auto operation : this->operations | views::values)
+    // {
 
-    float total_speed = 0;
-    for (auto AGV : this->AGVs | views::values)
-    {
-        total_speed += AGV->speed;
-    }
+    //     auto [iter, _] = remain_process_time.try_emplace(operation->machine_type, 0.0f);
+    //     if (operation->status <= OperationStatus::waiting)
+    //     {
+    //         iter->second += operation->process_time;
+    //     }
+    //     else if (operation->status == OperationStatus::processing)
+    //     {
+    //         iter->second += operation->finish_timestamp - this->timestamp;
+    //     }
 
-    return this->timestamp + remain_transport_distance / total_speed;
+    //     set<OperationId> unarrived_pred_ids;
+    //     ranges::set_difference(operation->predecessors, operation->arrived_preds, inserter(unarrived_pred_ids, unarrived_pred_ids.end()));
+    //     for (auto unarrived_pred : unarrived_pred_ids | views::transform([this](auto id)
+    //                                                                      { return this->operations.at(id); }))
+    //     {
+    //         if (!unarrived_pred->sent_succs.contains(operation->id))
+    //         {
+    //             remain_transport_distance += min_type_distance[{unarrived_pred->machine_type, operation->machine_type}];
+    //         }
+    //     }
+    // }
+
+    // for (auto AGV : this->AGVs | views::values)
+    // {
+    //     if (AGV->status != AGVStatus::idle)
+    //     {
+    //         remain_transport_distance += (AGV->finish_timestamp - this->timestamp) * AGV->speed;
+    //     }
+    // }
+
+    // float total_speed = 0;
+    // for (auto AGV : this->AGVs | views::values)
+    // {
+    //     total_speed += AGV->speed;
+    // }
+
+    // return this->timestamp + remain_transport_distance / total_speed;
 }
 
 vector<Action> Graph::get_available_actions()

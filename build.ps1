@@ -77,7 +77,9 @@ function BuildFrontend {
 
         Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
 
-        Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
+        if (Test-Path "frontend/src-tauri/target/$($mode)/_internal") {
+            Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
+        }
         
         $moved = $false
         do {

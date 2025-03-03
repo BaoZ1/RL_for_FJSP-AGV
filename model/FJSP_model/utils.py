@@ -2,9 +2,11 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import IterableDataset, DataLoader, Dataset
+from torch.nn.utils import clip_grad_norm_
 from torch_geometric.data import HeteroData, Batch, Data
 from FJSP_env import Graph, GraphFeature, Action, Observation
 from dataclasses import dataclass
+from collections.abc import Iterable
 
 
 def contiguous_transpose(x: torch.Tensor):
@@ -17,6 +19,7 @@ class Metadata:
         # operation relation
         ("operation", "predecessor", "operation"),
         ("operation", "successor", "operation"),
+        ("machine", "distance", "machine"),
         # hetero relation
         ("machine", "processable", "operation"),
         ("machine", "processing", "operation"),
@@ -35,6 +38,8 @@ class Metadata:
         ("operation", "load_to_rev", "AGV"),
     ]
     edge_attrs = {
+        ("machine", "distance", "machine"): 1,
+        # hetero
         ("machine", "processing", "operation"): 1,
         ("machine", "waiting", "operation"): 2,
         ("AGV", "target", "machine"): 1,
@@ -66,28 +71,28 @@ def build_graph(feature: GraphFeature):
     graph["AGV"].x = torch.tensor(feature.AGV_features)
 
     graph["operation", "predecessor", "operation"].edge_index = contiguous_transpose(
-        torch.tensor(feature.predecessor_idx, dtype=torch.int).view(-1, 2)
+        torch.tensor(feature.predecessor_idx, dtype=torch.int64).view(-1, 2)
     )
 
     graph["operation", "successor", "operation"].edge_index = contiguous_transpose(
-        torch.tensor(feature.successor_idx, dtype=torch.int).view(-1, 2)
+        torch.tensor(feature.successor_idx, dtype=torch.int64).view(-1, 2)
     )
 
     graph["machine", "processable", "operation"].edge_index = contiguous_transpose(
-        torch.tensor(feature.processable_idx, dtype=torch.int).view(-1, 2)
+        torch.tensor(feature.processable_idx, dtype=torch.int64).view(-1, 2)
     )
 
     graph["machine", "processing", "operation"].edge_index = contiguous_transpose(
-        torch.tensor([[x[0], x[1]] for x in feature.processing], dtype=torch.int).view(
-            -1, 2
-        )
+        torch.tensor(
+            [[x[0], x[1]] for x in feature.processing], dtype=torch.int64
+        ).view(-1, 2)
     )
     graph["machine", "processing", "operation"].edge_attr = torch.tensor(
         [[x[2]] for x in feature.processing], dtype=torch.float
     ).view(-1, 1)
 
     graph["machine", "waiting", "operation"].edge_index = contiguous_transpose(
-        torch.tensor([[x[0], x[1]] for x in feature.waiting], dtype=torch.int).view(
+        torch.tensor([[x[0], x[1]] for x in feature.waiting], dtype=torch.int64).view(
             -1, 2
         )
     )
@@ -96,7 +101,7 @@ def build_graph(feature: GraphFeature):
     ).view(-1, 2)
 
     graph["machine", "distance", "machine"].edge_index = contiguous_transpose(
-        torch.tensor([[x[0], x[1]] for x in feature.distance], dtype=torch.int).view(
+        torch.tensor([[x[0], x[1]] for x in feature.distance], dtype=torch.int64).view(
             -1, 2
         )
     )
@@ -106,22 +111,22 @@ def build_graph(feature: GraphFeature):
     ).view(-1, 1)
 
     graph["AGV", "position", "machine"].edge_index = contiguous_transpose(
-        torch.tensor(feature.AGV_position, dtype=torch.int).view(-1, 2)
+        torch.tensor(feature.AGV_position, dtype=torch.int64).view(-1, 2)
     )
 
     graph["AGV", "target", "machine"].edge_index = contiguous_transpose(
-        torch.tensor([[x[0], x[1]] for x in feature.AGV_target], dtype=torch.int).view(
-            -1, 2
-        )
+        torch.tensor(
+            [[x[0], x[1]] for x in feature.AGV_target], dtype=torch.int64
+        ).view(-1, 2)
     )
     graph["AGV", "target", "machine"].edge_attr = torch.tensor(
         [[x[2]] for x in feature.AGV_target], dtype=torch.float
     ).view(-1, 1)
 
     graph["AGV", "load_from", "operation"].edge_index = contiguous_transpose(
-        torch.tensor([[x[0], x[1]] for x in feature.AGV_loaded], dtype=torch.int).view(
-            -1, 2
-        )
+        torch.tensor(
+            [[x[0], x[1]] for x in feature.AGV_loaded], dtype=torch.int64
+        ).view(-1, 2)
     )
     graph["AGV", "load_to", "operation"].edge_index = contiguous_transpose(
         torch.tensor([[x[0], x[2]] for x in feature.AGV_loaded], dtype=torch.int).view(
@@ -131,7 +136,7 @@ def build_graph(feature: GraphFeature):
 
     for edge in graph.edge_types:
         src, name, dst = edge
-        if name in ["predecessor", "successor"]:
+        if name in ["predecessor", "successor", "distance"]:
             continue
         graph[dst, f"{name}_rev", src].edge_index = (
             graph[edge].edge_index.flip(0).contiguous()
@@ -232,3 +237,19 @@ class ReplayDataset(IterableDataset):
     def __iter__(self):
         for item in self.buffer.sample(self.sample_size):
             yield item
+
+
+class NormClipper:
+    def __init__(self, module: torch.nn.Module, mean_rate: float = 0.8, abnormal_rate: float = 1.2):
+        self.module = module
+        self.max_norm = None
+        self.mean_rate = mean_rate
+        self.abnormal_rate = abnormal_rate
+    
+    def clip(self):
+        raw_norm = clip_grad_norm_(self.module.parameters(), 1e8)
+        if self.max_norm is None:
+            self.max_norm = raw_norm      
+        else:
+            self.max_norm *= self.mean_rate + min(raw_norm / self.max_norm, self.abnormal_rate) * (1 - self.mean_rate)
+        return clip_grad_norm_(self.module.parameters(), self.max_norm)

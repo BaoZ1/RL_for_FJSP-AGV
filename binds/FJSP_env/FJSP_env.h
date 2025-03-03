@@ -108,7 +108,7 @@ public:
     static const MachineType dummy_machine_type = 0;
 
     static const size_t global_feature_size = 3;
-    static const size_t operation_feature_size = 9;
+    static const size_t operation_feature_size = 11;
     static const size_t machine_feature_size = 7;
     static const size_t AGV_feature_size = 5;
 
@@ -151,6 +151,8 @@ public:
     float get_travel_time(MachineId, MachineId, AGVId) const;
 
     static shared_ptr<Graph> rand_generate(GenerateParam);
+
+    vector<OperationId> operation_topological_sort() const;
 
     shared_ptr<Graph> copy() const;
 

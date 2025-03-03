@@ -5,8 +5,10 @@ from torch import optim
 from torch.optim import lr_scheduler
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
-from torch_geometric.data import Batch
 from torch_geometric import nn as gnn
+from torch_geometric.data import Batch
+from torch_geometric.utils.hetero import check_add_self_loops
+from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
 from FJSP_env import (
     Graph,
@@ -50,30 +52,113 @@ class ResidualLinear(nn.Module):
             else nn.Linear(in_channels, out_channels)
         )
 
+        self.norm = nn.LayerNorm(out_channels)
+
     def forward(self, x):
-        return self.project(x) + self.model(x)
+        return self.norm(self.project(x) + self.model(x))
+
+
+class HeteroConv(nn.Module):
+    def __init__(
+        self,
+        convs: dict[EdgeType, gnn.MessagePassing],
+        aggr: str | None = "sum",
+    ):
+        super().__init__()
+
+        for edge_type, module in convs.items():
+            check_add_self_loops(module, [edge_type])
+
+        self.convs = ModuleDict(convs)
+        self.aggr = aggr
+
+    def reset_parameters(self):
+        r"""Resets all learnable parameters of the module."""
+        for conv in self.convs.values():
+            conv.reset_parameters()
+
+    def forward(
+        self,
+        x_dict: dict[NodeType, Tensor],
+        edge_index_dict: dict[EdgeType, Tensor],
+        edge_attr_dict: dict[EdgeType, Tensor] | None = None,
+    ) -> dict[NodeType, Tensor]:
+        out_dict: dict[str, list[Tensor]] = {}
+
+        for edge_type, conv in self.convs.items():
+            src, rel, dst = edge_type
+
+            has_edge_level_arg = False
+
+            dicts: list[dict] = [x_dict, edge_index_dict]
+            if edge_attr_dict:
+                dicts.append(edge_attr_dict)
+            args = []
+            for value_dict in dicts:
+                if edge_type in value_dict:
+                    has_edge_level_arg = True
+                    args.append(value_dict[edge_type])
+                elif src == dst and src in value_dict:
+                    args.append(value_dict[src])
+                elif src in value_dict or dst in value_dict:
+                    args.append(
+                        (
+                            value_dict.get(src, None),
+                            value_dict.get(dst, None),
+                        )
+                    )
+                else:
+                    args.append(None)
+
+            if not has_edge_level_arg:
+                continue
+
+            out = conv(*args)
+
+            if dst not in out_dict:
+                out_dict[dst] = [out]
+            else:
+                out_dict[dst].append(out)
+
+        for key, value in out_dict.items():
+            out_dict[key] = gnn.conv.hetero_conv.group(value, self.aggr)
+
+        return out_dict
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(num_relations={len(self.convs)})"
 
 
 class ExtractLayer(nn.Module):
     def __init__(
         self,
         node_channels: tuple[int, int, int],
-        dropout: float = 0,
+        dropout: float = 0.0,
         residual: bool = True,
     ):
         super().__init__()
 
         self.residual = residual
 
-        self.operation_relation_extract = gnn.HeteroConv(
+        self.operation_relation_extract = HeteroConv(
             {
-                ("operation", name, "operation"): gnn.GATv2Conv(
-                    node_channels[0],
-                    node_channels[0],
-                    dropout=dropout,
-                    add_self_loops=False,
+                ("operation", name, "operation"): gnn.Sequential(
+                    "x, edge_index, edge_attr",
+                    [
+                        (
+                            gnn.GATv2Conv(
+                                node_channels[0],
+                                node_channels[0],
+                                dropout=dropout,
+                                add_self_loops=False,
+                            ),
+                            "x, edge_index, edge_attr -> x",
+                        ),
+                        nn.LayerNorm(node_channels[0]),
+                        nn.Tanh(),
+                    ],
                 )
-                for name in ["predecessor", "successor"]
+                for name in ("predecessor", "successor")
             }
         )
 
@@ -82,23 +167,33 @@ class ExtractLayer(nn.Module):
             "machine": node_channels[1],
             "AGV": node_channels[2],
         }
-        self.hetero_relation_extract = gnn.HeteroConv(
+        self.hetero_relation_extract = HeteroConv(
             {
-                edge: gnn.GATv2Conv(
-                    (type_channel_map[edge[0]], type_channel_map[edge[2]]),
-                    type_channel_map[edge[2]],
-                    edge_dim=Metadata.edge_attrs.get(edge, None),
-                    dropout=dropout,
-                    add_self_loops=False,
+                edge: gnn.Sequential(
+                    "x, edge_index, edge_attr",
+                    [
+                        (
+                            gnn.GATv2Conv(
+                                (type_channel_map[edge[0]], type_channel_map[edge[2]]),
+                                type_channel_map[edge[2]],
+                                edge_dim=Metadata.edge_attrs.get(edge, None),
+                                dropout=dropout,
+                                add_self_loops=False,
+                            ),
+                            "x, edge_index, edge_attr -> x",
+                        ),
+                        nn.LayerNorm(type_channel_map[edge[2]]),
+                        nn.Tanh(),
+                    ],
                 )
                 for edge in Metadata.edge_types
-                if edge[0] != edge[2] != "operation"
+                if edge[1] not in ("predecessor", "successor")
             }
         )
 
-        self.norm = nn.ModuleDict(
-            {k: nn.BatchNorm1d(v) for k, v in type_channel_map.items()}
-        )
+        # self.norm = nn.ModuleDict(
+        #     {k: nn.BatchNorm1d(v) for k, v in type_channel_map.items()}
+        # )
 
     def forward(
         self,
@@ -122,8 +217,8 @@ class ExtractLayer(nn.Module):
             else:
                 res[k] = v
 
-        for k, v in res.items():
-            res[k] = self.norm[k](v)
+        # for k, v in res.items():
+        #     res[k] = self.norm[k](v)
 
         return res
 
@@ -144,38 +239,78 @@ class StateMixer(nn.Module):
             }
         )
 
-        self.convs = gnn.HeteroConv(
+        self.convs = HeteroConv(
             {
-                (name, "global", f"{name}_global"): gnn.GATv2Conv(
-                    (node_channels[idx], global_channels[idx]),
-                    global_channels[idx],
-                    add_self_loops=False,
+                (name, "global", f"{name}_global"): gnn.Sequential(
+                    "x, edge_index",
+                    [
+                        (
+                            gnn.GATv2Conv(
+                                (node_channels[idx], global_channels[idx]),
+                                global_channels[idx],
+                                add_self_loops=False,
+                            ),
+                            "x, edge_index -> x",
+                        ),
+                        nn.LayerNorm(global_channels[idx]),
+                        nn.Tanh(),
+                    ],
                 )
                 for idx, name in enumerate(["operation", "machine", "AGV"])
             }
         )
-        self.type_norm = nn.ModuleDict(
-            {
-                f"{name}_global": nn.BatchNorm1d(global_channels[idx])
-                for idx, name in enumerate(["operation", "machine", "AGV"])
-            }
-        )
+        # self.type_norm = nn.ModuleDict(
+        #     {
+        #         f"{name}_global": nn.BatchNorm1d(global_channels[idx])
+        #         for idx, name in enumerate(["operation", "machine", "AGV"])
+        #     }
+        # )
 
         self.graph_mix = nn.Sequential(
             ResidualLinear(
-                sum(global_channels) + Graph.global_feature_size,
+                Graph.global_feature_size + sum(global_channels),
                 graph_global_channels * 2,
             ),
-            nn.BatchNorm1d(graph_global_channels * 2),
+            # nn.BatchNorm1d(graph_global_channels * 2),
             nn.Tanh(),
             ResidualLinear(graph_global_channels * 2, graph_global_channels * 2),
-            nn.BatchNorm1d(graph_global_channels * 2),
+            # nn.BatchNorm1d(graph_global_channels * 2),
             nn.Tanh(),
-            ResidualLinear(graph_global_channels * 2, graph_global_channels),
+            nn.Linear(graph_global_channels * 2, graph_global_channels),
             # nn.BatchNorm1d(graph_global_channels),
         )
 
     def forward(
+        self,
+        x_dict: dict[NodeType, Tensor],
+        global_attr: Tensor,
+    ):
+        node_dict = x_dict.copy()
+        edge_index_dict: dict[EdgeType, Tensor] = {}
+        for n in Metadata.node_types:
+            node_dict[f"{n}_global"] = self.global_tokens[n].unsqueeze(0)
+            edge_index_dict[(n, "global", f"{n}_global")] = torch.stack(
+                [
+                    torch.arange(x_dict[n].shape[0], dtype=torch.int64),
+                    torch.zeros(x_dict[n].shape[0], dtype=torch.int64),
+                ]
+            ).to(global_attr.device)
+
+        type_dict: dict[NodeType, Tensor] = self.convs(node_dict, edge_index_dict)
+        type_features = [
+            type_dict[f"{name}_global"] for name in ["operation", "machine", "AGV"]
+        ]
+
+        graph_feature = self.graph_mix(
+            torch.cat(
+                [global_attr] + type_features,
+                1,
+            )
+        )
+
+        return *type_features, graph_feature
+
+    def train_forward(
         self,
         x_dict: dict[NodeType, Tensor],
         global_attr: Tensor,
@@ -189,7 +324,9 @@ class StateMixer(nn.Module):
                 batch.max().item() + 1, 1
             )
             edge_index_dict[(k, "global", f"{k}_global")] = (
-                tensor(list(enumerate(batch))).T.contiguous().to(batch.device)
+                tensor([(i, b) for i, b in enumerate(batch)])
+                .T.contiguous()
+                .to(batch.device)
             )
 
         global_dict: dict[NodeType, Tensor] = self.convs(node_dict, edge_index_dict)
@@ -225,11 +362,13 @@ class StateExtract(nn.Module):
 
         self.init_project = nn.ModuleDict(
             {
-                "operation": nn.Linear(
+                "operation": ResidualLinear(
                     Graph.operation_feature_size, hidden_channels[0]
                 ),
-                "machine": nn.Linear(Graph.machine_feature_size, hidden_channels[1]),
-                "AGV": nn.Linear(Graph.AGV_feature_size, hidden_channels[2]),
+                "machine": ResidualLinear(
+                    Graph.machine_feature_size, hidden_channels[1]
+                ),
+                "AGV": ResidualLinear(Graph.AGV_feature_size, hidden_channels[2]),
             }
         )
 
@@ -243,30 +382,45 @@ class StateExtract(nn.Module):
             graph_global_channels,
         )
 
-    def forward(self, data: HeteroGraph | Batch) -> StateEmbedding:
-        x_dict = data.x_dict
-        edge_index_dict = data.edge_index_dict
-        edge_attr_dict: dict[EdgeType, Tensor] = data.collect(
-            "edge_attr", allow_empty=True
-        )
-        if isinstance(data, Batch):
-            batch_dict = {k: data[k].batch for k in x_dict}
-        else:
-            batch_dict = None
+    def forward(
+        self,
+        global_attr: Tensor,
+        x_dict: dict[NodeType, Tensor],
+        edge_index_dict: dict[EdgeType, Tensor],
+        edge_attr_dict: dict[EdgeType, Tensor],
+    ):
+        global_attr = global_attr.unsqueeze(0)
 
         for k, v in x_dict.items():
             x_dict[k] = self.init_project[k](v)
 
         for layer in self.backbone:
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
-            for key in x_dict:
-                x_dict[key] = F.tanh(x_dict[key])
 
-        global_dict, graph_feature = self.mix(x_dict, data.global_attr, batch_dict)
+        global_features = self.mix(x_dict, global_attr)
+
+        return [*x_dict.values(), *global_features]
+
+    def train_forward(self, data: Batch) -> StateEmbedding:
+        x_dict = data.x_dict
+        edge_index_dict = data.edge_index_dict
+        edge_attr_dict: dict[EdgeType, Tensor] = data.collect(
+            "edge_attr", allow_empty=True
+        )
+        batch_dict = {k: data[k].batch for k in x_dict}
+
+        for k, v in x_dict.items():
+            x_dict[k] = self.init_project[k](v)
+
+        for layer in self.backbone:
+            x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
+
+        (
+            global_dict,
+            graph_feature,
+        ) = self.mix.train_forward(x_dict, data.global_attr, batch_dict)
 
         return x_dict, global_dict, graph_feature
-
-    __call__: Callable[[HeteroGraph | Batch], StateEmbedding]
 
 
 class ActionEncoder(nn.Module):
@@ -278,7 +432,8 @@ class ActionEncoder(nn.Module):
         hidden_channels: tuple[int, int, int],
     ):
         super().__init__()
-
+        self.out_channels = out_channels
+        self.node_channels = node_channels
         self.wait_emb = nn.Parameter(torch.zeros(out_channels))
         self.pick_encoder = nn.Sequential(
             ResidualLinear(
@@ -298,7 +453,7 @@ class ActionEncoder(nn.Module):
                 )
                 for _ in range(stack_num[0])
             ],
-            ResidualLinear(hidden_channels[0], out_channels),
+            nn.Linear(hidden_channels[0], out_channels),
         )
         self.transport_encoder = nn.Sequential(
             ResidualLinear(
@@ -313,7 +468,7 @@ class ActionEncoder(nn.Module):
                 )
                 for _ in range(stack_num[1])
             ],
-            ResidualLinear(hidden_channels[1], out_channels),
+            nn.Linear(hidden_channels[1], out_channels),
         )
         self.move_encoder = nn.Sequential(
             ResidualLinear(
@@ -328,7 +483,7 @@ class ActionEncoder(nn.Module):
                 )
                 for _ in range(stack_num[2])
             ],
-            ResidualLinear(hidden_channels[2], out_channels),
+            nn.Linear(hidden_channels[2], out_channels),
         )
 
     def action_tensor_cat(
@@ -442,7 +597,43 @@ class ActionEncoder(nn.Module):
                 ].pop(0)
         return [torch.stack(tensors) for tensors in batched_tensors]
 
-    def forward(
+    def forward(self, embeds: dict[NodeType, Tensor], actions: dict[str, Tensor]):
+        for action_type, action_idxs in actions.items():
+            match action_type:
+                case ActionType.wait.name:
+                    wait_embs = self.wait_emb.unsqueeze(0).repeat(
+                        action_idxs.shape[0], 1
+                    )
+                case ActionType.pick.name:
+                    (
+                        AGV_idx,
+                        from_idx,
+                        to_idx,
+                        target_idx,
+                    ) = torch.unbind(action_idxs, 1)
+                    AGV_embeds = embeds["AGV"][AGV_idx]
+                    from_embeds = embeds["operation"][from_idx]
+                    to_embeds = embeds["operation"][to_idx]
+                    target_embeds = embeds["machine"][target_idx]
+                    raw = torch.cat(
+                        [AGV_embeds, from_embeds, to_embeds, target_embeds], dim=1
+                    )
+                    pick_embs = self.pick_encoder(raw)
+                case ActionType.transport.name:
+                    AGV_idx, target_idx = torch.unbind(action_idxs, 1)
+                    AGV_embeds = embeds["AGV"][AGV_idx]
+                    target_embeds = embeds["machine"][target_idx]
+                    raw = torch.cat([AGV_embeds, target_embeds], dim=1)
+                    transport_embs = self.transport_encoder(raw)
+                case ActionType.move.name:
+                    AGV_idx, target_idx = torch.unbind(action_idxs, 1)
+                    AGV_embeds = embeds["AGV"][AGV_idx]
+                    target_embeds = embeds["machine"][target_idx]
+                    raw = torch.cat([AGV_embeds, target_embeds], dim=1)
+                    move_embs = self.move_encoder(raw)
+        return torch.cat([wait_embs, pick_embs, transport_embs, move_embs])
+
+    def train_forward(
         self,
         batch_actions: list[list[Action]],
         embeddings: dict[str, Tensor],
@@ -459,16 +650,6 @@ class ActionEncoder(nn.Module):
             idx_mappers,
         )
         return self.encode(types, batched_tensors)
-
-    __call__: Callable[
-        [
-            list[list[Action]],
-            dict[str, Tensor],
-            dict[str, dict[int, int]],
-            list[IdIdxMapper],
-        ],
-        list[Tensor],
-    ]
 
     def single_action_encode(
         self,
@@ -497,19 +678,19 @@ class ActionDecoder(nn.Module):
         super().__init__()
 
         self.cls_net = nn.Sequential(
-            nn.Linear(in_channels, in_channels),
+            ResidualLinear(in_channels, in_channels),
             nn.Tanh(),
-            nn.Linear(in_channels, in_channels),
+            ResidualLinear(in_channels, in_channels),
             nn.Tanh(),
             nn.Linear(in_channels, 4),
         )
 
         self.pick_decoder = nn.Sequential(
-            nn.Linear(in_channels, in_channels * 5),
+            ResidualLinear(in_channels, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
             nn.Linear(
                 in_channels * 5,
@@ -523,11 +704,11 @@ class ActionDecoder(nn.Module):
         )
 
         self.transport_decoder = nn.Sequential(
-            nn.Linear(in_channels, in_channels * 5),
+            ResidualLinear(in_channels, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
             nn.Linear(
                 in_channels * 5,
@@ -536,11 +717,11 @@ class ActionDecoder(nn.Module):
         )
 
         self.move_decoder = nn.Sequential(
-            nn.Linear(in_channels, in_channels * 5),
+            ResidualLinear(in_channels, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
-            nn.Linear(in_channels * 5, in_channels * 5),
+            ResidualLinear(in_channels * 5, in_channels * 5),
             nn.Tanh(),
             nn.Linear(
                 in_channels * 5,
@@ -565,10 +746,12 @@ class ValueNet(nn.Module):
     def __init__(self, state_channels: int, hidden_channels: int, stack_num: int):
         super().__init__()
 
+        self.state_channels = state_channels
+
         self.model = nn.Sequential(
             ResidualLinear(state_channels, hidden_channels),
             # nn.BatchNorm1d(hidden_channels),
-            nn.LeakyReLU(),
+            nn.Tanh(),
             *[
                 nn.Sequential(
                     ResidualLinear(hidden_channels, hidden_channels),
@@ -577,7 +760,7 @@ class ValueNet(nn.Module):
                 )
                 for _ in range(stack_num)
             ],
-            ResidualLinear(hidden_channels, 1),
+            nn.Linear(hidden_channels, 1),
         )
 
     def forward(self, state: Tensor):
@@ -596,26 +779,27 @@ class PolicyNet(nn.Module):
     ):
         super().__init__()
 
+        self.state_channels = state_channels
+        self.action_channels = action_channels
+
         base_channels = state_channels + action_channels
         self.model = nn.Sequential(
             ResidualLinear(base_channels, hidden_channels),
-            nn.LeakyReLU(),
+            nn.Tanh(),
             *[
                 nn.Sequential(
                     ResidualLinear(hidden_channels, hidden_channels),
-                    nn.LeakyReLU(),
+                    nn.Tanh(),
                 )
                 for _ in range(stack_num)
             ],
-            ResidualLinear(hidden_channels, 1),
+            nn.Linear(hidden_channels, 1),
             nn.Flatten(-2),
         )
 
     def forward(self, state: Tensor, actions: Tensor):
         if state.dim() < actions.dim():
-            s = list(state.shape)
-            s.insert(-1, actions.size(-2))
-            state = state.unsqueeze(-2).expand(s)
+            state = state.unsqueeze(-2).repeat_interleave(actions.shape[-2], -2)
         return self.model(torch.cat([state, actions], -1))
 
     __call__: Callable[[Tensor, Tensor], Tensor]
@@ -633,17 +817,17 @@ class PredictNet(nn.Module):
         base_channels = state_channels + action_channels
         self.model = nn.Sequential(
             ResidualLinear(base_channels, hidden_channels),
-            nn.BatchNorm1d(hidden_channels),
+            # nn.BatchNorm1d(hidden_channels),
             nn.Tanh(),
             *[
                 nn.Sequential(
                     ResidualLinear(hidden_channels, hidden_channels),
-                    nn.BatchNorm1d(hidden_channels),
+                    # nn.BatchNorm1d(hidden_channels),
                     nn.Tanh(),
                 )
                 for _ in range(stack_num)
             ],
-            ResidualLinear(hidden_channels, state_channels),
+            nn.Linear(hidden_channels, state_channels),
         )
 
     def forward(self, state: Tensor, action: Tensor):
@@ -654,224 +838,6 @@ class PredictNet(nn.Module):
         return self.model(torch.cat([state, action], -1))
 
     __call__: Callable[[Tensor, Tensor], Tensor]
-
-
-class ValuePrefixNet(nn.Module):
-    def __init__(self, state_channels: int, hidden_size: int, layer_num: int):
-        super().__init__()
-
-        self.prev_proj = nn.Sequential(
-            nn.Linear(state_channels, state_channels),
-            # Rearrange("n l s -> n s l"),
-            # nn.BatchNorm1d(state_channels),
-            # Rearrange("n s l -> n l s"),
-            nn.Tanh(),
-        )
-        self.lstm = nn.LSTM(state_channels, hidden_size, layer_num, batch_first=True)
-        self.succ_proj = nn.Sequential(
-            nn.Linear(hidden_size, state_channels),
-            # Rearrange("n l s -> n s l"),
-            # nn.BatchNorm1d(state_channels),
-            # Rearrange("n s l -> n l s"),
-            nn.Tanh(),
-            nn.Linear(state_channels, 1),
-            Rearrange("n l 1 -> n l"),
-        )
-
-    def forward(self, x: Tensor, hx: tuple[Tensor, Tensor] | None):
-        # N L S
-        x = self.prev_proj(x)
-        x, hx = self.lstm(x, hx)
-        x = self.succ_proj(x)
-        return x, hx
-
-    __call__: Callable[
-        [Tensor, tuple[Tensor, Tensor] | None], tuple[Tensor, tuple[Tensor, Tensor]]
-    ]
-
-
-# class ActionGenerator(nn.Module):
-#     def __init__(
-#         self,
-#         state_channels: int,
-#         action_channels: int,
-#         out_num: int,
-#         gen_hidden_channels: int,
-#         gen_stack_num: int,
-#         dis_hidden_channels: int,
-#         dis_stack_num: int,
-#         cls_emb_dim: int,
-#         cls_hidden_channels: int,
-#         cls_stack_num: int,
-#     ):
-#         super().__init__()
-
-#         self.action_channels = action_channels
-#         self.out_num = out_num
-
-#         base_channels = state_channels + action_channels
-
-#         self.embeddings = nn.Embedding(out_num, cls_emb_dim)
-
-#         self.generator = nn.Sequential(
-#             nn.Linear(state_channels + cls_emb_dim, gen_hidden_channels),
-#             nn.BatchNorm1d(gen_hidden_channels),
-#             nn.Tanh(),
-#             *[
-#                 nn.Sequential(
-#                     nn.Linear(gen_hidden_channels, gen_hidden_channels),
-#                     nn.BatchNorm1d(gen_hidden_channels),
-#                     nn.Tanh(),
-#                 )
-#                 for _ in range(gen_stack_num)
-#             ],
-#             nn.Linear(gen_hidden_channels, action_channels),
-#         )
-
-#         self.discriminator = nn.Sequential(
-#             nn.Linear(base_channels, dis_hidden_channels),
-#             nn.BatchNorm1d(dis_hidden_channels),
-#             nn.Tanh(),
-#             *[
-#                 nn.Sequential(
-#                     nn.Linear(dis_hidden_channels, dis_hidden_channels),
-#                     nn.BatchNorm1d(dis_hidden_channels),
-#                     nn.Tanh(),
-#                 )
-#                 for _ in range(dis_stack_num)
-#             ],
-#             nn.Linear(dis_hidden_channels, 1),
-#             nn.Sigmoid(),
-#             nn.Flatten(-2),
-#         )
-
-#         self.classifier = nn.Sequential(
-#             nn.Linear(base_channels, cls_hidden_channels),
-#             nn.BatchNorm1d(cls_hidden_channels),
-#             nn.Tanh(),
-#             *[
-#                 nn.Sequential(
-#                     nn.Linear(cls_hidden_channels, cls_hidden_channels),
-#                     nn.BatchNorm1d(cls_hidden_channels),
-#                     nn.Tanh(),
-#                 )
-#                 for _ in range(cls_stack_num)
-#             ],
-#             nn.Linear(cls_hidden_channels, out_num),
-#         )
-
-#         self.eval_generator = nn.Sequential(
-#             Rearrange("n o s -> (n o) s"),
-#             self.generator,
-#             Rearrange("(n o) s -> n o s", o=self.out_num),
-#         )
-
-#     def train_generate(self, states: Tensor) -> tuple[Tensor, Tensor]:
-#         class_target = torch.randint(
-#             self.out_num, (states.size(0),), device=states.device
-#         )
-#         class_embeddings = self.embeddings(class_target)
-#         return self.generator(torch.cat([states, class_embeddings], -1)), class_target
-
-#     def discriminate(self, states: Tensor, actions: Tensor):
-#         return self.discriminator(torch.cat([states, actions], -1))
-
-#     def classify(self, states: Tensor, actions: Tensor):
-#         return self.classifier(torch.cat([states, actions], -1))
-
-#     @torch.no_grad
-#     def generate(self, states: Tensor) -> Tensor:
-#         class_target = torch.randint(
-#             self.out_num, (states.size(0), self.out_num), device=states.device
-#         )
-#         class_embeddings = self.embeddings(class_target)
-#         generated: Tensor = self.eval_generator(
-#             torch.cat(
-#                 [
-#                     states.unsqueeze(1).expand(-1, self.out_num, -1),
-#                     class_embeddings,
-#                 ],
-#                 -1,
-#             )
-#         )
-#         return generated
-
-
-class ActionGenerator(nn.Module):
-    def __init__(
-        self,
-        state_channels: int,
-        action_channels: int,
-        out_num: int,
-        gen_hidden_channels: int,
-        gen_stack_num: int,
-        dis_hidden_channels: int,
-        dis_stack_num: int,
-        cls_emb_dim: int,
-        cls_hidden_channels: int,
-        cls_stack_num: int,
-    ):
-        super().__init__()
-
-        self.action_channels = action_channels
-        self.out_num = out_num
-        self.emb_dim = cls_emb_dim
-
-        base_channels = state_channels + action_channels
-
-        self.generator = nn.Sequential(
-            ResidualLinear(state_channels + cls_emb_dim, gen_hidden_channels),
-            # nn.BatchNorm1d(gen_hidden_channels),
-            nn.Tanh(),
-            *[
-                nn.Sequential(
-                    ResidualLinear(gen_hidden_channels, gen_hidden_channels),
-                    # nn.BatchNorm1d(gen_hidden_channels),
-                    nn.Tanh(),
-                )
-                for _ in range(gen_stack_num)
-            ],
-            ResidualLinear(gen_hidden_channels, action_channels),
-        )
-
-        self.discriminator = nn.Sequential(
-            ResidualLinear(base_channels, dis_hidden_channels),
-            # nn.BatchNorm1d(dis_hidden_channels),
-            nn.LeakyReLU(),
-            *[
-                nn.Sequential(
-                    ResidualLinear(dis_hidden_channels, dis_hidden_channels),
-                    # nn.BatchNorm1d(dis_hidden_channels),
-                    nn.LeakyReLU(),
-                )
-                for _ in range(dis_stack_num)
-            ],
-            ResidualLinear(dis_hidden_channels, 1),
-            nn.Flatten(-2),
-        )
-
-    def train_generate(self, states: Tensor) -> Tensor:
-        noise = torch.rand([*states.shape[:-1], self.emb_dim], device=states.device)
-        return self.generator(torch.cat([states, noise], -1))
-
-    def discriminate(self, states: Tensor, actions: Tensor):
-        return self.discriminator(torch.cat([states, actions], -1))
-
-    @torch.no_grad
-    def generate(self, states: Tensor) -> Tensor:
-        noise = torch.rand(
-            states.size(0) * self.out_num, self.emb_dim, device=states.device
-        )
-        generated: Tensor = self.generator(
-            torch.cat(
-                [
-                    repeat(states, "b s -> (b o) s", o=self.out_num),
-                    noise,
-                ],
-                -1,
-            )
-        )
-        return rearrange(generated, "(b o) s -> b o s", o=self.out_num)
 
 
 class Node:
@@ -888,14 +854,12 @@ class Node:
         self,
         graph: Graph,
         actions: list[Action],
-        value_prefix: float,
-        hidden: tuple[Tensor, Tensor],
+        reward: float,
         logits: Tensor,
     ):
         self.graph = graph.copy()
         self.actions = actions
-        self.value_prefix = value_prefix
-        self.hidden = hidden
+        self.reward = reward
         for i in range(len(actions)):
             self.children.append(Node(self, i, logits[i].item()))
 
@@ -918,13 +882,6 @@ class Node:
     def expanded(self):
         return len(self.children) > 0
 
-    def reward(self):
-        if self.parent is not None:
-            return (self.value_prefix - self.parent.value_prefix) / (
-                Agent.discount**self.depth
-            )
-        return self.value_prefix
-
     def value(self):
         return np.mean(self.value_list)
 
@@ -936,7 +893,7 @@ class Node:
         for child in self.children:
             if child.expanded():
                 sum_p_q += probs[child.index] * (
-                    child.reward() + Agent.discount * child.value()
+                    child.reward + Agent.discount * child.value()
                 )
                 sum_prob += probs[child.index]
                 sum_visit += child.visit_count
@@ -949,7 +906,7 @@ class Node:
 
         completed_Qs = [
             (
-                (child.reward() + Agent.discount * child.value())
+                (child.reward + Agent.discount * child.value())
                 if child.expanded()
                 else v_mix
             )
@@ -962,17 +919,18 @@ class Node:
 
     def improved_policy(self):
         logits = tensor(self.logits())
+        sigma_Qs = self.sigma_Qs()
+        # if self.depth == 0:
+        #     print(logits, sigma_Qs)
         if logits.numel() > 1:
             logits = (logits - logits.mean()) / logits.std()
         else:
             logits = logits - logits.mean()
-        sigma_Qs = self.sigma_Qs()
         if not (sigma_Qs == sigma_Qs[0]).all():
             sigma_Qs = (sigma_Qs - sigma_Qs.mean()) / sigma_Qs.std()
         else:
             sigma_Qs = sigma_Qs - sigma_Qs.mean()
-        # if self.depth == 0:
-        #     print(logits, sigma_Qs)
+        
         return F.softmax(logits + sigma_Qs, 0)
 
     def select_action(self):
@@ -1018,24 +976,17 @@ class RootNode(Node):
 
 
 class MCTS:
-    def __init__(self, agent: "Agent"):
-        self.agent = agent
-
-    @property
-    def value_net(self):
-        return (
-            self.agent.value_target
-            if self.agent._trainer is not None and self.agent.trainer.state.stage == RunningStage.TRAINING
-            else self.agent.value_net
-        )
-
-    @property
-    def policy_net(self):
-        return (
-            self.agent.policy_target
-            if self.agent._trainer is not None and self.agent.trainer.state.stage == RunningStage.TRAINING
-            else self.agent.policy_net
-        )
+    def __init__(
+        self,
+        extractor: StateExtract,
+        action_encoder: ActionEncoder,
+        value_net: ValueNet,
+        policy_net: PolicyNet,
+    ):
+        self.extractor = extractor
+        self.action_encoder = action_encoder
+        self.value_net = value_net
+        self.policy_net = policy_net
 
     @torch.no_grad()
     def search(
@@ -1046,20 +997,21 @@ class MCTS:
     ):
         assert root_sample_count & (root_sample_count - 1) == 0  # 2的幂
 
+        device = next(self.extractor.parameters()).device
+
         obs = [Observation.from_env(g) for g in graphs]
 
-        batched_graph = Batch.from_data_list([build_graph(o.feature) for o in obs]).to(
-            self.agent.device
-        )
+        batched_graph = Batch.from_data_list([build_graph(o.feature) for o in obs])
+        batched_graph.to(device)
 
         (
             node_states,
             _,
             graph_states,
-        ) = self.agent.extractor(batched_graph)
+        ) = self.extractor.train_forward(batched_graph)
 
         actions_list = [o.action_list for o in obs]
-        actions_embs = self.agent.action_encoder(
+        actions_embs = self.action_encoder.train_forward(
             actions_list,
             node_states,
             get_offsets(batched_graph),
@@ -1067,21 +1019,13 @@ class MCTS:
         )
 
         roots: list[RootNode] = []
-        for (graph, state, actions, actions_emb, value), hidden in zip(
+        for ((graph, state, actions, actions_emb, value),) in zip(
             zip(
                 graphs,
                 graph_states,
                 actions_list,
                 actions_embs,
                 self.value_net(graph_states),
-            ),
-            zip(
-                *[
-                    torch.unbind(h, 1)
-                    for h in self.agent.value_prefix_net(
-                        graph_states.unsqueeze(1), None
-                    )[1]
-                ]
             ),
         ):
             new_root = RootNode()
@@ -1091,7 +1035,6 @@ class MCTS:
                 graph,
                 actions,
                 0,
-                hidden,
                 self.policy_net(state, actions_emb),
             )
             roots.append(new_root)
@@ -1101,9 +1044,9 @@ class MCTS:
         sim_stages: list[int] = []
         for i, actions in enumerate(actions_embs):
             gumbel = torch.distributions.Gumbel(0, 1)
-            g: Tensor = gumbel.sample([actions.size(0)]).to(self.agent.device)
+            g: Tensor = gumbel.sample([actions.size(0)]).to(device)
             gs.append(g)
-            logits = tensor(roots[i].logits(), device=self.agent.device)
+            logits = tensor(roots[i].logits(), device=device)
             begin_count = min(root_sample_count, actions.size(0))
             sim_SH_idxs.append(
                 self.SH_idx(begin_count, root_sample_count, simulation_count)
@@ -1113,17 +1056,10 @@ class MCTS:
             roots[i].set_remain_actions_idx(topk_indices)
             remaining_actions_index.append(topk_indices)
 
-        # remaining_action_count = root_sample_count
-        # phase_finish_idx = self.phase_step_num(
-        #     root_sample_count,
-        #     remaining_action_count,
-        #     simulation_count,
-        # )
         for sim_idx in count():
             target_leaves: list[Node] = []
             target_actions = []
             parent_graphs = []
-            hiddens = ([], [])
             sim_state_idx: list[int] = []
             for i, (root, actions_index, counts, stage) in enumerate(
                 zip(roots, remaining_actions_index, sim_SH_idxs, sim_stages)
@@ -1142,37 +1078,27 @@ class MCTS:
                 target_leaves.append(node)
                 target_actions.append(node.parent.actions[node.index])
                 parent_graphs.append(node.parent.graph)
-                try:
-                    assert not node.parent.finished
-                except:
-                    print(root.finished)
-                    print(node.parent.depth)
-                    raise Exception
-                hiddens[0].append(node.parent.hidden[0])
-                hiddens[1].append(node.parent.hidden[1])
 
             if len(sim_state_idx) == 0:
                 break
-            
+
             if len(target_leaves) > 0:
                 env = Environment.from_graphs(parent_graphs)
-                obs = env.step(target_actions)[2]
+                rewards, dones, obs = env.step(target_actions)
                 batched_graph = Batch.from_data_list(
                     [build_graph(o.feature) for o in obs],
-                ).to(self.agent.device)
+                ).to(device)
                 (
                     node_states,
                     _,
                     graph_states,
-                ) = self.agent.extractor(batched_graph)
+                ) = self.extractor.train_forward(batched_graph)
 
-                values = self.value_net(graph_states)
-                value_prefixs, new_hiddens = self.agent.value_prefix_net(
-                    graph_states.unsqueeze(1),
-                    (torch.stack(hiddens[0], 1), torch.stack(hiddens[1], 1)),
+                values = self.value_net(graph_states) * (
+                    1 - tensor(dones, dtype=torch.float, device=device)
                 )
                 actions_list = [o.action_list for o in obs]
-                actions_embs = self.agent.action_encoder(
+                actions_embs = self.action_encoder.train_forward(
                     actions_list,
                     node_states,
                     get_offsets(batched_graph),
@@ -1185,10 +1111,8 @@ class MCTS:
                         states,
                         actions,
                         actions_emb,
-                        value_prefix,
+                        reward,
                     ),
-                    hidden_0,
-                    hidden_1,
                     value,
                 ) in zip(
                     target_leaves,
@@ -1198,25 +1122,22 @@ class MCTS:
                             graph_states,
                             actions_list,
                             actions_embs,
-                            value_prefixs,
+                            rewards,
                         ),
-                        torch.unbind(new_hiddens[0], 1),
-                        torch.unbind(new_hiddens[1], 1),
                         values,
                     ),
                 ):
                     node.expand(
                         graph,
                         actions,
-                        value_prefix.item(),
-                        (hidden_0, hidden_1),
+                        reward,
                         self.policy_net(states, actions_emb),
                     )
                     while True:
                         node.visit_count += 1
                         node.value_list.append(value.item())
                         if (p := node.parent) is not None:
-                            value = node.reward() + Agent.discount * value
+                            value = node.reward + Agent.discount * value
                             node = p
                         else:
                             break
@@ -1230,29 +1151,13 @@ class MCTS:
                     remaining_actions_index[idx] = new_idx
                     sim_stages[idx] += 1
 
-            # if sim_idx == phase_finish_idx:
-            #     remaining_actions_index = self.sequential_halving(
-            #         roots, gs, remaining_actions_index
-            #     )
-            #     remaining_action_count /= 2
-            #     if remaining_action_count > 2:
-            #         phase_finish_idx += self.phase_step_num(
-            #             root_sample_count,
-            #             remaining_action_count,
-            #             simulation_count,
-            #         )
-            #     else:
-            #         phase_finish_idx = simulation_count - 1
-
         assert all(len(idxs) == 1 for idxs in remaining_actions_index)
         target_values = tensor(
             [root.value() for root in roots],
             dtype=torch.float,
-            device=self.agent.device,
+            device=device,
         )
-        target_policies = [
-            root.improved_policy().float().to(self.agent.device) for root in roots
-        ]
+        target_policies = [root.improved_policy().float().to(device) for root in roots]
         return (
             [idxs[0] for idxs in remaining_actions_index],
             target_values,
@@ -1264,7 +1169,8 @@ class MCTS:
         if old_m < 2:
             return []
         m = 2 ** math.ceil(math.log2(m))
-        n = math.floor(m * old_n / old_m * math.log(m, old_m))
+        # n = math.floor(m * old_n / old_m * math.log(m, old_m))
+        n = math.floor(old_n * math.log(m, old_m))
         counts = []
         remained = m
         sum_count = 0
@@ -1291,26 +1197,114 @@ class MCTS:
 
     def sequential_halving(self, root: Node, gs: Tensor, action_idx: list[int]):
         g = gs[action_idx]
-        logits = tensor(root.logits())[action_idx].to(self.agent.device)
-        sigma_Qs = root.sigma_Qs()[action_idx].to(self.agent.device)
+        logits = tensor(root.logits())[action_idx].to(gs.device)
+        sigma_Qs = root.sigma_Qs()[action_idx].to(gs.device)
         remain_idx = torch.topk(
             g + logits + sigma_Qs, math.ceil(len(action_idx) / 2)
         ).indices
         return [action_idx[idx] for idx in remain_idx.tolist()]
 
-    # def sequential_halving(
-    #     self, roots: list[Node], gs: list[Tensor], actions_index: list[list[int]]
-    # ):
-    #     ret = []
-    #     for root, all_g, idxs in zip(roots, gs, actions_index):
-    #         g = all_g[idxs]
-    #         logits = tensor(root.logits())[idxs].to(self.device)
-    #         sigma_Qs = root.sigma_Qs()[idxs].to(self.device)
-    #         remain_idx = torch.topk(
-    #             g + logits + sigma_Qs, math.ceil(len(idxs) / 2)
-    #         ).indices
-    #         ret.append([idxs[idx] for idx in remain_idx.tolist()])
-    #     return ret
+
+class Model(nn.Module):
+
+    def __init__(
+        self,
+        node_channels: tuple[int, int, int],
+        type_channels: tuple[int, int, int],
+        graph_channels: int,
+        state_layer_num: int,
+        action_channels: int,
+        action_hidden_channel: tuple[int, int, int],
+        action_stack_num: tuple[int, int, int],
+        value_hidden_channel: int,
+        value_stack_num: int,
+        policy_hidden_channel: int,
+        policy_stack_num: int,
+    ):
+        super().__init__()
+
+        self.extractor = StateExtract(
+            node_channels,
+            type_channels,
+            graph_channels,
+            state_layer_num,
+        )
+
+        self.action_encoder = ActionEncoder(
+            action_channels,
+            node_channels,
+            action_stack_num,
+            action_hidden_channel,
+        )
+
+        self.value_net = ValueNet(
+            graph_channels,
+            value_hidden_channel,
+            value_stack_num,
+        )
+
+        self.policy_net = PolicyNet(
+            graph_channels,
+            action_channels,
+            policy_hidden_channel,
+            policy_stack_num,
+        )
+
+        self.mcts = MCTS(
+            self.extractor,
+            self.action_encoder,
+            self.value_net,
+            self.policy_net,
+        )
+
+    @torch.no_grad
+    def single_step_predict(
+        self, graphs: list[Graph], sample_count: int, sim_count: int
+    ):
+        (
+            act_idxs,
+            _,
+            _,
+        ) = self.mcts.search(
+            graphs,
+            sample_count,
+            sim_count,
+        )
+        return [
+            g.get_available_actions()[idx] for g, idx in zip(graphs, act_idxs)
+        ], act_idxs
+
+    @torch.inference_mode()
+    async def predict(
+        self,
+        graph: Graph,
+        sample_count: int,
+        sim_count: int,
+    ):
+        env = Environment.from_graphs([graph], True)
+
+        for round_count in count(1):
+            actions, _ = self.single_step_predict(
+                env.envs,
+                sample_count,
+                sim_count,
+            )
+            env.step(actions, False)
+
+            finished_step, total_step = env.envs[0].progress()
+
+            yield {
+                "round_count": round_count,
+                "finished_step": finished_step,
+                "total_step": total_step,
+                "graph_state": env.envs[0],
+                "action": actions[0],
+            }
+
+            if env.envs[0].finished():
+                break
+
+            await asyncio.sleep(0)
 
 
 class Agent(L.LightningModule):
@@ -1319,7 +1313,6 @@ class Agent(L.LightningModule):
     class TrainStage(IntEnum):
         encode = auto()
         _value = auto()
-        generate = auto()
         policy = auto()
         explore = auto()
 
@@ -1345,16 +1338,6 @@ class Agent(L.LightningModule):
         policy_stack_num: int,
         predict_hidden_channel: int,
         predict_stack_num: int,
-        prefix_hidden_channel: int,
-        prefix_stack_num: int,
-        generate_count: int,
-        gen_hidden_channels: int,
-        gen_stack_num: int,
-        dis_hidden_channels: int,
-        dis_stack_num: int,
-        cls_emb_dim: int,
-        cls_hidden_channels: int,
-        cls_stack_num: int,
         root_sample_count: int,
         simulation_count: int,
         val_predict_num: int,
@@ -1374,34 +1357,30 @@ class Agent(L.LightningModule):
         self.epoch_size = epoch_size
         self.batch_size = batch_size
 
-        self.extractor = StateExtract(
+        self.model = Model(
             node_channels,
             type_channels,
             graph_channels,
             state_layer_num,
-        )
-        self.action_encoder = ActionEncoder(
             action_channels,
-            node_channels,
-            action_stack_num,
             action_hidden_channel,
-        )
-        self.action_decoder = ActionDecoder(action_channels, node_channels)
-        self.value_net = ValueNet(
-            graph_channels,
+            action_stack_num,
             value_hidden_channel,
             value_stack_num,
+            policy_hidden_channel,
+            policy_stack_num,
         )
+        self.predictor = PredictNet(
+            graph_channels,
+            action_channels,
+            predict_hidden_channel,
+            predict_stack_num,
+        )
+        self.action_decoder = ActionDecoder(action_channels, node_channels)
         self.value_target = ValueNet(
             graph_channels,
             value_hidden_channel,
             value_stack_num,
-        )
-        self.policy_net = PolicyNet(
-            graph_channels,
-            action_channels,
-            policy_hidden_channel,
-            policy_stack_num,
         )
         self.policy_target = PolicyNet(
             graph_channels,
@@ -1409,29 +1388,19 @@ class Agent(L.LightningModule):
             policy_hidden_channel,
             policy_stack_num,
         )
-        # self.predictor = PredictNet(
-        #     graph_channels,
-        #     action_channels,
-        #     predict_hidden_channel,
-        #     predict_stack_num,
-        # )
-        self.value_prefix_net = ValuePrefixNet(
-            graph_channels, prefix_hidden_channel, prefix_stack_num
+        self.mcts = MCTS(
+            self.model.extractor,
+            self.model.action_encoder,
+            self.value_target,
+            self.policy_target,
         )
-        # self.action_generator = ActionGenerator(
-        #     graph_channels,
-        #     action_channels,
-        #     generate_count,
-        #     gen_hidden_channels,
-        #     gen_stack_num,
-        #     dis_hidden_channels,
-        #     dis_stack_num,
-        #     cls_emb_dim,
-        #     cls_hidden_channels,
-        #     cls_stack_num,
-        # )
 
-        self.mcts = MCTS(self)
+        self.extractor_norm_clipper = NormClipper(self.model.extractor)
+        self.predictor_norm_clipper = NormClipper(self.predictor)
+        self.action_encoder_norm_clipper = NormClipper(self.model.action_encoder)
+        self.action_decoder_norm_clipper = NormClipper(self.action_decoder)
+        self.value_net_norm_clipper = NormClipper(self.model.value_net)
+        self.policy_net_norm_clipper = NormClipper(self.model.policy_net)
 
         self.root_sample_count = root_sample_count
         self.simulation_count = simulation_count
@@ -1442,79 +1411,45 @@ class Agent(L.LightningModule):
 
         self.stage = stage
 
-    def save(self, path: Path, name: str):
-        target_dir = path / self.stage.name / f"{name}.ckpt"
-        state_dict = {}
-        if self.stage >= Agent.TrainStage.encode:
-            state_dict.update(
-                {
-                    "extractor": self.extractor.state_dict(),
-                    "action_encoder": self.action_encoder.state_dict(),
-                    "action_decoder": self.action_decoder.state_dict(),
-                    "value_net": self.value_net.state_dict(),
-                    "value_prefix_net": self.value_prefix_net.state_dict(),
-                    "predictor": self.predictor.state_dict(),
-                }
-            )
-        if self.stage >= Agent.TrainStage.generate:
-            state_dict.update(
-                {
-                    "action_generator": self.action_generator.state_dict(),
-                }
-            )
-        if self.stage >= Agent.TrainStage.policy:
-            state_dict.update(
-                {
-                    "policy_net": self.policy_net.state_dict(),
-                }
-            )
-        torch.save(state_dict, target_dir)
-
-    def load(self, path: str, stages: list[TrainStage]):
-        ckpt = torch.load(path)
+    def load(self, path: str, stage: TrainStage):
+        ckpt = torch.load(path, weights_only=False)
         states: dict[str, Tensor] = ckpt["state_dict"]
         load_modules = []
-        if Agent.TrainStage.encode in stages:
+        if stage >= Agent.TrainStage.encode:
             load_modules.extend(
                 [
                     "extractor",
                     "action_encoder",
-                    "action_decoder",
-                    "value_prefix_net",
-                    # "predictor",
                 ]
             )
-        if Agent.TrainStage._value in stages:
+
+        if stage >= Agent.TrainStage._value:
             load_modules.extend(["value_net"])
-        # if Agent.TrainStage.generate in stages:
-        #     load_modules.extend(["action_generator"])
-        if Agent.TrainStage.policy in stages:
+
+        if stage >= Agent.TrainStage.policy:
             load_modules.extend(["policy_net"])
 
         for module_name in load_modules:
-            getattr(self, module_name).load_state_dict(
+            getattr(self.model, module_name).load_state_dict(
                 {
-                    k[len(module_name) + 1 :]: v
+                    k[len(module_name) + 7 :]: v
                     for (k, v) in states.items()
-                    if k.startswith(f"{module_name}.")
+                    if k.startswith(f"model.{module_name}.")
                 }
             )
 
     def compile_modules(self):
-        torch.compile(self.extractor, fullgraph=True)
-        torch.compile(self.action_encoder, fullgraph=True)
+        torch.compile(self.model, fullgraph=True)
+        torch.compile(self.predictor, fullgraph=True)
         torch.compile(self.action_decoder, fullgraph=True)
-        torch.compile(self.value_net, fullgraph=True)
         torch.compile(self.value_target, fullgraph=True)
-        torch.compile(self.policy_net, fullgraph=True)
         torch.compile(self.policy_target, fullgraph=True)
-        # torch.compile(self.predictor, fullgraph=True)
-        torch.compile(self.value_prefix_net, fullgraph=True)
-        # torch.compile(self.action_generator, fullgraph=True)
 
     def prepare_data(self):
         assert self.envs is not None
+        self.eval()
         self.init_buffer()
+        self.train()
 
         self.baseline, self.val_data = self.get_baseline()
 
@@ -1522,15 +1457,7 @@ class Agent(L.LightningModule):
         if self.stage == Agent.TrainStage.encode:
             return None, [None]
         if self.stage == Agent.TrainStage._value:
-            return None, [
-                Environment(1, [params], False).envs[0]
-                for params in self.envs.generate_params
-            ]
-        # if self.stage == Agent.TrainStage.generate:
-        #     return None, [
-        #         Environment(1, [params], False).envs[0]
-        #         for params in self.envs.generate_params
-        #     ]
+            return None, [None]
         if self.stage >= Agent.TrainStage.policy:
             temp_envs = [
                 Environment(1, [params], False) for params in self.envs.generate_params
@@ -1560,8 +1487,8 @@ class Agent(L.LightningModule):
             obs = self.envs.observe()
             graphs = [g.copy() for g in self.envs.envs]
             if self.stage == Agent.TrainStage.explore:
-                acts, act_idxs = self.single_step_predict(
-                    obs,
+                acts, act_idxs = self.model.single_step_predict(
+                    [g.copy() for g in self.envs.envs],
                     self.root_sample_count,
                     self.simulation_count,
                 )
@@ -1589,11 +1516,10 @@ class Agent(L.LightningModule):
     def configure_optimizers(self):
         encode_stage_opt = optim.Adam(
             chain(
-                self.extractor.parameters(),
-                self.action_encoder.parameters(),
+                self.model.extractor.parameters(),
+                self.predictor.parameters(),
+                self.model.action_encoder.parameters(),
                 self.action_decoder.parameters(),
-                self.value_prefix_net.parameters(),
-                # self.predictor.parameters(),
             ),
             self.lr,
         )
@@ -1603,53 +1529,32 @@ class Agent(L.LightningModule):
             0.99,
         )
 
-        value_stage_opt = optim.Adam(
-            self.value_net.parameters(),
+        value_opt = optim.SGD(
+            self.model.value_net.parameters(),
             self.lr,
         )
-        value_stage_sch = lr_scheduler.StepLR(
-            value_stage_opt,
+        value_sch = lr_scheduler.StepLR(
+            value_opt,
             self.opt_step_size,
-            0.99,
+            0.95,
         )
 
-        # discriminator_opt = optim.Adam(
-        #     self.action_generator.discriminator.parameters(),
-        #     self.lr,
-        #     (0, 0.9),
-        #     weight_decay=1e-3,
-        # )
-        # discriminator_sch = lr_scheduler.StepLR(
-        #     discriminator_opt,
-        #     self.opt_step_size,
-        #     0.99,
-        # )
-
-        # generator_opt = optim.Adam(
-        #     self.action_generator.generator.parameters(),
-        #     self.lr,
-        #     (0, 0.9),
-        #     weight_decay=1e-3,
-        # )
-        # generator_sch = lr_scheduler.StepLR(
-        #     generator_opt,
-        #     self.opt_step_size,
-        #     0.99,
-        # )
-
         policy_opt = optim.SGD(
-            self.policy_net.parameters(),
+            chain(
+                self.model.value_net.parameters(), self.model.policy_net.parameters()
+            ),
             self.lr,
         )
         policy_sch = lr_scheduler.StepLR(
             policy_opt,
             self.opt_step_size,
-            0.9,
+            0.95,
         )
 
         explore_opt = optim.Adam(
-            chain(self.value_net.parameters(), self.policy_net.parameters()),
-            self.lr * 1e-2,
+            self.model.parameters(),
+            self.lr,
+            weight_decay=1e-2,
         )
         explore_sch = lr_scheduler.StepLR(
             explore_opt,
@@ -1658,16 +1563,12 @@ class Agent(L.LightningModule):
 
         return [
             encode_stage_opt,
-            value_stage_opt,
-            # discriminator_opt,
-            # generator_opt,
+            value_opt,
             policy_opt,
             explore_opt,
         ], [
             encode_stage_sch,
-            value_stage_sch,
-            # discriminator_sch,
-            # generator_sch,
+            value_sch,
             policy_sch,
             explore_sch,
         ]
@@ -1688,11 +1589,11 @@ class Agent(L.LightningModule):
 
     def on_train_start(self):
         match self.stage:
-            case Agent.TrainStage.encode:
-                self.value_target.load_state_dict(self.value_net.state_dict())
-            case Agent.TrainStage.policy:
-                self.value_target.load_state_dict(self.value_net.state_dict())
-                self.policy_target.load_state_dict(self.policy_net.state_dict())
+            case Agent.TrainStage._value:
+                self.value_target.load_state_dict(self.model.value_net.state_dict())
+            case Agent.TrainStage.policy | Agent.TrainStage.explore:
+                self.value_target.load_state_dict(self.model.value_net.state_dict())
+                self.policy_target.load_state_dict(self.model.policy_net.state_dict())
 
     @torch.no_grad
     def play_step(self):
@@ -1700,8 +1601,8 @@ class Agent(L.LightningModule):
             obs = self.envs.observe()
             graphs = [g.copy() for g in self.envs.envs]
             if self.stage == Agent.TrainStage.explore:
-                acts, act_idxs = self.single_step_predict(
-                    obs,
+                acts, act_idxs = self.model.single_step_predict(
+                    [g.copy() for g in self.envs.envs],
                     self.root_sample_count,
                     self.simulation_count,
                 )
@@ -1736,7 +1637,7 @@ class Agent(L.LightningModule):
             node_states,
             _,
             graph_states,
-        ) = self.extractor(batched_graph)
+        ) = self.model.extractor.train_forward(batched_graph)
         graph_states = rearrange(
             graph_states,
             "(n l) s -> n l s",
@@ -1744,10 +1645,15 @@ class Agent(L.LightningModule):
         )
         with torch.no_grad():
             next_graph_states = rearrange(
-                self.extractor(batched_next_graph)[2],
+                self.model.extractor.train_forward(batched_next_graph)[2],
                 "(n l) s -> n l s",
                 l=self.seq_len,
             )
+
+        graph_diff_loss = (
+            torch.clip(0.5 - graph_states.var((0, 1)), 0)
+            + torch.clip(graph_states.var((0, 1)) - 1, 0)
+        ).mean()
 
         offsets = get_offsets(batched_graph)
         mappers = sum(
@@ -1759,13 +1665,13 @@ class Agent(L.LightningModule):
             [],
         )
         types = [[action.action_type for action in actions] for actions in actions]
-        raw_actions_tensors = self.action_encoder.action_tensor_cat(
+        raw_actions_tensors = self.model.action_encoder.action_tensor_cat(
             actions,
             node_states,
             offsets,
             mappers,
         )
-        actions_embs = self.action_encoder.encode(
+        actions_embs = self.model.action_encoder.encode(
             types, [[*tensors] for tensors in raw_actions_tensors]
         )
         cated_actions_embs = torch.cat(actions_embs)
@@ -1843,22 +1749,20 @@ class Agent(L.LightningModule):
             )
         )
 
-        target_value_prefix = []
-        current_prefix = torch.zeros(
-            next_graph_states.size(0), dtype=torch.float, device=self.device
+        action_embs = torch.stack(
+            [
+                torch.stack(
+                    [
+                        actions_embs[i * self.seq_len + seq_step][
+                            item.action_idxs[seq_step]
+                        ]
+                        for seq_step in range(self.seq_len)
+                    ]
+                )
+                for i, item in enumerate(items)
+            ]
         )
-        rewards = tensor([item.rewards for item in items], device=self.device)
-        for i in range(self.seq_len):
-            current_prefix = current_prefix + rewards[:, i] * Agent.discount**i
-            target_value_prefix.append(current_prefix)
-        target_value_prefix = torch.stack(target_value_prefix, 1)
-
-        pred_value_prefix = self.value_prefix_net(
-            torch.cat([graph_states, next_graph_states[:, 0:1]], 1), None
-        )[0][:, 1:]
-
-        value_prefix_loss = F.mse_loss(pred_value_prefix, target_value_prefix)
-
+        pred_next_states = self.predictor(graph_states, action_embs)
         # pred_next_states = []
         # prev_states = graph_states[:, 0]
         # for pred_step in range(self.seq_len):
@@ -1875,12 +1779,12 @@ class Agent(L.LightningModule):
         #     prev_states = new_pred_next_states
         # pred_next_states = torch.stack(pred_next_states, 1)
 
-        # self.log_dict(
-        #     {
-        #         "info/next_state_scale": next_graph_states.abs().mean(),
-        #         "info/pred_state_scale": pred_next_states.abs().mean(),
-        #     }
-        # )
+        self.log_dict(
+            {
+                "info/next_state_scale": next_graph_states.abs().mean(),
+                "info/pred_state_scale": pred_next_states.abs().mean(),
+            }
+        )
 
         # pred_state_sim_losses = -torch.stack(
         #     [
@@ -1892,7 +1796,7 @@ class Agent(L.LightningModule):
         #     ]
         # )
 
-        # pred_state_sim_loss = torch.mean(pred_state_sim_losses)
+        pred_state_sim_loss = F.mse_loss(pred_next_states, next_graph_states)
 
         # self.log_dict(
         #     {f"info/pred_sim_{i}": v for i, v in enumerate(pred_state_sim_losses)}
@@ -1913,29 +1817,27 @@ class Agent(L.LightningModule):
 
         opt.zero_grad()
         self.manual_backward(
-            cls_loss
-            + decode_loss
-            + type_diff_loss
-            + action_diff_loss
-            + value_prefix_loss
-            # + pred_state_sim_loss
+            graph_diff_loss / graph_diff_loss.detach().abs()
+            + cls_loss / cls_loss.detach().abs()
+            + decode_loss / decode_loss.detach().abs()
+            + type_diff_loss / type_diff_loss.detach().abs()
+            + action_diff_loss / action_diff_loss.detach().abs()
+            + pred_state_sim_loss / pred_state_sim_loss.detach().abs()
         )
-        clip_grad_norm_(self.extractor.parameters(), 0.5)
-        clip_grad_norm_(self.action_encoder.parameters(), 0.5)
-        clip_grad_norm_(self.action_decoder.parameters(), 0.5)
-        clip_grad_norm_(self.value_net.parameters(), 0.5)
-        clip_grad_norm_(self.value_prefix_net.parameters(), 0.5)
-        # clip_grad_norm_(self.predictor.parameters(), 0.5)
+        self.extractor_norm_clipper.clip()
+        self.action_encoder_norm_clipper.clip()
+        self.action_decoder_norm_clipper.clip()
+        self.predictor_norm_clipper.clip()
         opt.step()
 
         self.log_dict(
             {
+                "loss/graph_diff": graph_diff_loss,
                 "loss/cls": cls_loss,
                 "loss/decode": decode_loss,
                 "loss/type_diff": type_diff_loss,
                 "loss/action_diff": action_diff_loss,
-                "loss/value_prefix": value_prefix_loss,
-                # "loss/pred_state_sim": pred_state_sim_loss,
+                "loss/pred_state_sim": pred_state_sim_loss,
             }
         )
 
@@ -1945,181 +1847,50 @@ class Agent(L.LightningModule):
             obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
             graphs = [build_graph(o.feature) for o in chain(*obs)]
             batched_graph = Batch.from_data_list(graphs).to(self.device)
+            graph_states = rearrange(
+                self.model.extractor.train_forward(batched_graph)[2],
+                "(n l) s -> n l s",
+                l=self.seq_len,
+            )
 
-            next_obs = [
-                [Observation.from_env(g) for g in item.next_graphs] for item in items
+            last_obs = [
+                Observation.from_env(item.next_graphs[-1]) for item in items
             ]
-            next_graphs = [build_graph(o.feature) for o in chain(*next_obs)]
-            batched_next_graph = Batch.from_data_list(next_graphs).to(self.device)
+            last_graphs = [build_graph(o.feature) for o in last_obs]
+            batched_last_graph = Batch.from_data_list(last_graphs).to(self.device)
+            last_graph_states = self.model.extractor.train_forward(batched_last_graph)[2]
 
-            graph_states = self.extractor(batched_graph)[2]
-            next_graph_states = self.extractor(batched_next_graph)[2]
-
-            rewards = tensor(
-                sum([item.rewards for item in items], []),
-                device=self.device,
-            )
-            dones = tensor(
-                sum([item.dones for item in items], []),
-                dtype=torch.float,
-                device=self.device,
-            )
-            next_value = self.value_target(next_graph_states)
+            dones = tensor([item.dones[-1] for item in items], dtype=torch.float, device=self.device)
+            target_value = self.value_target(last_graph_states) * dones
+            for i in reversed(range(self.seq_len)):
+                target_value += tensor([item.rewards[i] for item in items], device=self.device)
         self.train()
 
-        value_loss = F.mse_loss(
-            self.value_net(graph_states),
-            rewards + Agent.discount * next_value * (1 - dones),
+        pred_value = self.model.value_net(graph_states[:, 0])
+        value_loss = F.mse_loss(pred_value, target_value)
+        self.log_dict(
+            {
+                "loss/value": value_loss,
+            }
         )
-        self.log("loss/value", value_loss)
-
         opt.zero_grad()
-        self.manual_backward(value_loss)
-        # clip_grad_norm_(self.value_net.parameters(), 0.5)
+        self.manual_backward(
+            value_loss / value_loss.detach().abs()
+        )
+        self.value_net_norm_clipper.clip()
+        self.policy_net_norm_clipper.clip()
         opt.step()
 
         eps = 0.005
-        for t, n in zip(self.value_target.parameters(), self.value_net.parameters()):
+        for t, n in zip(
+            self.value_target.parameters(), self.model.value_net.parameters()
+        ):
             t.data.copy_(t.data * (1 - eps) + n.data * eps)
-
-    # def generate_stage(
-    #     self,
-    #     items: list[SequenceReplayItem],
-    #     dis_opt: LightningOptimizer,
-    #     gen_opt: LightningOptimizer,
-    # ):
-    #     self.eval()
-    #     with torch.no_grad():
-    #         graphs = [
-    #             build_graph(obs.feature)
-    #             for obs in sum([item.states for item in items], [])
-    #         ]
-    #         batched_graph = Batch.from_data_list(graphs).to(self.device)
-
-    #         (
-    #             node_states,
-    #             _,
-    #             graph_states,
-    #         ) = self.extractor(batched_graph)
-
-    #         offsets = get_offsets(batched_graph)
-    #         mappers = sum(
-    #             [[state.mapper for state in item.states] for item in items],
-    #             [],
-    #         )
-    #         actions = sum(
-    #             [[state.action_list for state in item.states] for item in items],
-    #             [],
-    #         )
-
-    #         actions_embs = self.action_encoder(
-    #             actions,
-    #             node_states,
-    #             offsets,
-    #             mappers,
-    #         )
-    #     self.train()
-
-    #     # wasserstein
-
-    #     for _ in range(5):
-    #         true_action_embs = torch.stack(
-    #             [emb[np.random.randint(emb.size(0))] for emb in actions_embs]
-    #         )
-
-    #         with torch.no_grad():
-    #             gen_action_embs = self.action_generator.train_generate(graph_states)
-
-    #         e = torch.rand(true_action_embs.size(0), 1).to(self.device)
-    #         mixed_action_embs = (
-    #             true_action_embs * e + gen_action_embs * (1 - e)
-    #         ).requires_grad_()
-
-    #         dis_true, dis_gen, dis_mix = torch.chunk(
-    #             self.action_generator.discriminate(
-    #                 repeat(graph_states, "b s -> (r b) s", r=3),
-    #                 torch.cat([true_action_embs, gen_action_embs, mixed_action_embs]),
-    #             ),
-    #             3,
-    #         )
-
-    #         grads = torch.autograd.grad(
-    #             dis_mix,
-    #             mixed_action_embs,
-    #             torch.ones_like(dis_mix),
-    #             True,
-    #             True,
-    #         )[0]
-
-    #         n = torch.norm(grads, 2, 1)
-    #         gp = (n - 0.5) ** 2
-
-    #         d_loss = torch.mean(dis_gen - dis_true + 80 * gp)
-
-    #         dis_opt.zero_grad()
-    #         self.manual_backward(d_loss)
-    #         # clip_grad_norm_(self.action_generator.discriminator.parameters(), 0.5)
-    #         dis_opt.step()
-
-    #         self.log_dict(
-    #             {
-    #                 "info/norm_min": n.min(),
-    #                 "info/norm_max": n.max(),
-    #             }
-    #         )
-
-    #         self.log_dict(
-    #             {
-    #                 "loss/dis_gen": torch.mean(dis_gen),
-    #                 "loss/dis_true": torch.mean(dis_true),
-    #                 "loss/gp": torch.mean(gp),
-    #                 "loss/critic": d_loss,
-    #             }
-    #         )
-
-    #     gens = self.action_generator.train_generate(graph_states)
-
-    #     g_loss = -torch.mean(self.action_generator.discriminate(graph_states, gens))
-    #     self.log("loss/gen", g_loss)
-
-    #     g_sim = torch.mean(
-    #         torch.stack(
-    #             [
-    #                 torch.min(((gen - true) ** 2).mean(-1))
-    #                 for gen, true in zip(gens, actions_embs)
-    #             ]
-    #         )
-    #     )
-    #     self.log("info/g_sim", g_sim)
-
-    #     gen_opt.zero_grad()
-    #     self.manual_backward(g_loss)
-    #     gen_opt.step()
-
-    #     self.eval()
-    #     with torch.no_grad():
-    #         true_values = [
-    #             self.value_net(self.predictor(state, actions))
-    #             for state, actions in zip(graph_states, actions_embs)
-    #         ]
-    #         gen_values = self.value_net(self.predictor(graph_states, gens))
-    #     self.train()
-
-    #     value_sim = torch.mean(
-    #         torch.stack(
-    #             [
-    #                 torch.min((gen - true) ** 2)
-    #                 for gen, true in zip(gen_values, true_values)
-    #             ]
-    #         )
-    #     )
-    #     self.log("info/value_sim", value_sim)
 
     def policy_stage(
         self,
         items: list[SequenceReplayItem],
-        v_opt: LightningOptimizer,
-        p_opt: LightningOptimizer,
+        opt: LightningOptimizer,
     ):
         self.eval()
         with torch.no_grad():
@@ -2130,7 +1901,7 @@ class Agent(L.LightningModule):
                 node_states,
                 _,
                 graph_states,
-            ) = self.extractor(batched_graph)
+            ) = self.model.extractor.train_forward(batched_graph)
 
             offsets = get_offsets(batched_graph)
             mappers = sum(
@@ -2142,7 +1913,7 @@ class Agent(L.LightningModule):
                 [],
             )
 
-            actions_embs = self.action_encoder(
+            actions_embs = self.model.action_encoder.train_forward(
                 actions,
                 node_states,
                 offsets,
@@ -2159,11 +1930,11 @@ class Agent(L.LightningModule):
             )
         self.train()
 
-        pred_value = self.value_net(graph_states)
+        pred_value = self.model.value_net(graph_states)
         pred_policy = []
         policy_logits = []
         for state, embs in zip(graph_states, actions_embs):
-            logits = self.policy_net(state, embs)
+            logits = self.model.policy_net(state, embs)
             pred_policy.append(logits.softmax(-1))
             policy_logits.append(logits)
         policy_logits = torch.cat(policy_logits)
@@ -2190,78 +1961,76 @@ class Agent(L.LightningModule):
             }
         )
 
-        v_opt.zero_grad()
-        self.manual_backward(value_loss)
-        v_opt.step()
-
-        p_opt.zero_grad()
-        self.manual_backward(policy_loss)
-        p_opt.step()
+        opt.zero_grad()
+        self.manual_backward(
+            value_loss / value_loss.detach().abs()
+            + policy_loss / policy_loss.detach().abs()
+        )
+        self.value_net_norm_clipper.clip()
+        self.policy_net_norm_clipper.clip()
+        opt.step()
 
         eps = 0.005
-        for t, n in zip(self.value_target.parameters(), self.value_net.parameters()):
+        for t, n in zip(
+            self.value_target.parameters(), self.model.value_net.parameters()
+        ):
             t.data.copy_(t.data * (1 - eps) + n.data * eps)
-        for t, n in zip(self.policy_target.parameters(), self.policy_net.parameters()):
+        for t, n in zip(
+            self.policy_target.parameters(), self.model.policy_net.parameters()
+        ):
             t.data.copy_(t.data * (1 - eps) + n.data * eps)
 
     def explore_stage(self, items: list[SequenceReplayItem], opt: LightningOptimizer):
+
+        obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
+        graphs = [build_graph(o.feature) for o in chain(*obs)]
+        batched_graph = Batch.from_data_list(graphs).to(self.device)
+        (
+            node_states,
+            _,
+            graph_states,
+        ) = self.model.extractor.train_forward(batched_graph)
+
+        offsets = get_offsets(batched_graph)
+        mappers = sum(
+            [[o.mapper for o in os] for os in obs],
+            [],
+        )
+        actions = sum(
+            [[o.action_list for o in os] for os in obs],
+            [],
+        )
+
+        actions_embs = self.model.action_encoder.train_forward(
+            actions,
+            node_states,
+            offsets,
+            mappers,
+        )
         self.eval()
         with torch.no_grad():
-            graphs = [
-                build_graph(obs.feature)
-                for obs in sum([item.states for item in items], [])
-            ]
-            batched_graph = Batch.from_data_list(graphs).to(self.device)
-
-            (
-                node_states,
-                _,
-                graph_states,
-            ) = self.extractor(batched_graph)
-
-            offsets = get_offsets(batched_graph)
-            mappers = sum(
-                [[state.mapper for state in item.states] for item in items],
-                [],
-            )
-            actions = sum(
-                [[state.action_list for state in item.states] for item in items],
-                [],
-            )
-
-            actions_embs = self.action_encoder(
-                actions,
-                node_states,
-                offsets,
-                mappers,
-            )
             (
                 _,
                 target_value,
                 target_policy,
             ) = self.mcts.search(
-                graph_states,
-                actions_embs,
+                sum([item.graphs for item in items], []),
                 self.root_sample_count,
                 self.simulation_count,
             )
         self.train()
 
-        pred_value = self.value_net(graph_states)
+        pred_value = self.model.value_net(graph_states)
         pred_policy = []
-        policy_logits = []
         for state, embs in zip(graph_states, actions_embs):
-            logits = self.policy_net(state, embs)
+            logits = self.model.policy_net(state, embs)
             pred_policy.append(logits.softmax(-1))
-            policy_logits.append(logits)
-        policy_logits = torch.cat(policy_logits)
-        self.log("info/policy_logits_min_var", policy_logits.var(-1).min())
 
         value_loss = F.mse_loss(pred_value, target_value)
         policy_loss = torch.mean(
             torch.stack(
                 [
-                    F.kl_div(torch.log(pred), target, reduction="batchmean")
+                    F.kl_div(torch.log(target), pred, reduction="batchmean")
                     for pred, target in zip(pred_policy, target_policy)
                 ]
             )
@@ -2274,262 +2043,80 @@ class Agent(L.LightningModule):
         )
 
         opt.zero_grad()
-        self.manual_backward(value_loss + policy_loss)
-        clip_grad_norm_(self.value_net.parameters(), 0.5)
-        clip_grad_norm_(self.policy_net.parameters(), 0.5)
+        self.manual_backward(
+            value_loss / value_loss.detach() + policy_loss / policy_loss.detach()
+        )
+        state_norm = self.extractor_norm_clipper.clip()
+        action_norm = self.action_encoder_norm_clipper.clip()
+        value_norm = self.value_net_norm_clipper.clip()
+        policy_norm = self.policy_net_norm_clipper.clip()
+        self.log_dict(
+            {
+                "info/state_norm": state_norm,
+                "info/action_norm": action_norm,
+                "info/value_norm": value_norm,
+                "info/policy_norm": policy_norm,
+            }
+        )
+        self.log_dict(
+            {
+                "info/state_max_norm": self.extractor_norm_clipper.max_norm,
+                "info/action_max_norm": self.action_encoder_norm_clipper.max_norm,
+                "info/value_max_norm": self.value_net_norm_clipper.max_norm,
+                "info/policy_max_norm": self.policy_net_norm_clipper.max_norm,
+            }
+        )
         opt.step()
+
+        eps = 0.005
+        for t, n in zip(
+            self.value_target.parameters(), self.model.value_net.parameters()
+        ):
+            t.data.copy_(t.data * (1 - eps) + n.data * eps)
+        for t, n in zip(
+            self.policy_target.parameters(), self.model.policy_net.parameters()
+        ):
+            t.data.copy_(t.data * (1 - eps) + n.data * eps)
 
     def training_step(self, items: list[SequenceReplayItem]):
         (
             encode_stage_opt,
-            value_stage_opt,
-            # discriminator_opt,
-            # generator_opt,
+            value_opt,
             policy_opt,
             explore_opt,
         ) = self.optimizers()
         (
             encode_stage_sch,
-            value_stage_sch,
-            # discriminator_sch,
-            # generator_sch,
+            value_sch,
             policy_sch,
             explore_sch,
         ) = self.lr_schedulers()
         match self.stage:
             case Agent.TrainStage.encode:
                 self.encode_stage(items, encode_stage_opt)
-                encode_stage_sch.step()
+                # encode_stage_sch.step()
             case Agent.TrainStage._value:
-                self.value_stage(items, value_stage_opt)
-                value_stage_sch.step()
-                pass
-            # case Agent.TrainStage.generate:
-            #     self.generate_stage(items, discriminator_opt, generator_opt)
-            # discriminator_sch.step()
-            # generator_sch.step()
+                self.value_stage(items, value_opt)
             case Agent.TrainStage.policy:
-                self.policy_stage(items, value_stage_opt, policy_opt)
+                # self.policy_stage(items, policy_opt)
+                # value_stage_sch.step()
+                # policy_sch.step()
+                self.explore_stage(items, explore_opt)
+                # explore_sch.step()
             case Agent.TrainStage.explore:
                 self.explore_stage(items, explore_opt)
+                # explore_sch.step()
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.eval()
         self.play_step()
         self.train()
 
-    @torch.no_grad
-    def single_step_predict(
-        self, graphs: list[Graph], sample_count: int, sim_count: int
-    ):
-        obs = [Observation.from_env(g) for g in graphs]
-
-        # batched_graph = Batch.from_data_list(
-        #     [build_graph(ob.feature) for ob in obs]
-        # ).to(self.device)
-
-        # (
-        #     node_states,
-        #     _,
-        #     graph_states,
-        # ) = self.extractor(batched_graph)
-
-        # offsets = get_offsets(batched_graph)
-        # mappers = [ob.mapper for ob in obs]
-        # action_lists = [ob.action_list for ob in obs]
-
-        # action_embs = self.action_encoder(
-        #     action_lists,
-        #     node_states,
-        #     offsets,
-        #     mappers,
-        # )
-        (
-            act_idxs,
-            _,
-            _,
-        ) = self.mcts.search(
-            graphs,
-            sample_count,
-            sim_count,
-        )
-        return [ob.action_list[idx] for ob, idx in zip(obs, act_idxs)], act_idxs
-
-    @torch.inference_mode()
-    async def predict(
-        self,
-        graph: Graph,
-        sample_count: int,
-        sim_count: int,
-    ):
-        env = Environment.from_graphs([graph], True)
-
-        for round_count in count(1):
-            actions, _ = self.single_step_predict(
-                [graph],
-                sample_count,
-                sim_count,
-            )
-            env.step(actions, False)
-
-            finished_step, total_step = env.envs[0].progress()
-
-            yield {
-                "round_count": round_count,
-                "finished_step": finished_step,
-                "total_step": total_step,
-                "graph_state": env.envs[0],
-                "action": actions[0],
-            }
-
-            if env.envs[0].finished():
-                break
-
-            await asyncio.sleep(0)
-
     def validation_step(self, batch: list[Graph]):
         match self.stage:
-            case Agent.TrainStage._value:
-                pass
-                # obs = Environment.from_graphs(
-                #     [graph.copy() for graph in batch], True
-                # ).observe()
-                # batched_graph = Batch.from_data_list(
-                #     [build_graph(ob.feature) for ob in obs]
-                # ).to(self.device)
-
-                # (
-                #     node_states,
-                #     type_states,
-                #     graph_states,
-                # ) = self.extractor(batched_graph)
-
-                # offsets = get_offsets(batched_graph)
-                # mappers = [ob.mapper for ob in obs]
-                # action_lists = [ob.action_list for ob in obs]
-                # action_embs = self.action_encoder(
-                #     action_lists,
-                #     node_states,
-                #     offsets,
-                #     mappers,
-                # )
-                # action_types = [
-                #     [action.action_type.value for action in ob.action_list]
-                #     for ob in obs
-                # ]
-                # stack_action_embs, ps = pack(action_embs, "* a")
-                # repeated_states, _ = pack(
-                #     [
-                #         repeat(states, "s -> a s", a=p[0])
-                #         for states, p in zip(graph_states, ps)
-                #     ],
-                #     "* s",
-                # )
-                # pred_next_states = self.predictor(repeated_states, stack_action_embs)
-                # pred_rewards = self.value_prefix_net(
-                #     torch.stack([repeated_states, pred_next_states], 1), None
-                # )[0][:, 1]
-                # values = self.value_net(pred_next_states)
-                # for i, (ts, rs, vs) in enumerate(
-                #     zip(
-                #         action_types,
-                #         unpack(pred_rewards, ps, "*"),
-                #         unpack(values, ps, "*"),
-                #     )
-                # ):
-                #     type_Qs: dict[int, list[float]] = {}
-                #     for t, r, v in zip(ts, rs, vs, strict=True):
-                #         type_Qs.setdefault(t, []).append(r.item() + v.item())
-                #     self.log_dict(
-                #         {
-                #             f"val/env_{i}_pick_Q": np.mean(
-                #                 type_Qs[ActionType.pick.value]
-                #             ),
-                #             f"val/env_{i}_move_Q": np.mean(
-                #                 type_Qs[ActionType.move.value]
-                #             ),
-                #         },
-                #         batch_size=len(batch),
-                #     )
-            # case Agent.TrainStage.generate:
-            #     env = Environment.from_graphs([graph.copy() for graph in batch])
-            #     for _ in range(np.random.randint(30)):
-            #         obs = env.observe()
-            #         acts = []
-            #         act_idxs = []
-            #         for ob in obs:
-            #             act, act_idx = single_step_useful_only_predict(ob, 0.1)
-            #             acts.append(act)
-            #             act_idxs.append(act_idx)
-            #         env.step(acts)
-
-            #     obs = env.observe()
-            #     batched_graph = Batch.from_data_list(
-            #         [build_graph(ob.feature) for ob in obs]
-            #     ).to(self.device)
-            #     (
-            #         node_states,
-            #         _,
-            #         graph_states,
-            #     ) = self.extractor(batched_graph)
-            #     offsets = get_offsets(batched_graph)
-            #     mappers = [ob.mapper for ob in obs]
-            #     action_lists = [ob.action_list for ob in obs]
-            #     action_embs = self.action_encoder(
-            #         action_lists,
-            #         node_states,
-            #         offsets,
-            #         mappers,
-            #     )
-            #     stack_action_embs, ps = pack(action_embs, "* a")
-            #     repeated_states, _ = pack(
-            #         [
-            #             repeat(states, "s -> a s", a=p[0])
-            #             for states, p in zip(graph_states, ps)
-            #         ],
-            #         "* s",
-            #     )
-            #     true_pred_next_states = self.predictor(
-            #         repeated_states, stack_action_embs
-            #     )
-            #     true_pred_rewards = self.value_prefix_net(
-            #         torch.stack([repeated_states, true_pred_next_states], 1), None
-            #     )[0][:, 1]
-            #     true_pred_values = self.value_net(true_pred_next_states)
-            #     for i, t_Q in enumerate(
-            #         unpack(true_pred_rewards + true_pred_values, ps, "*"),
-            #     ):
-            #         self.log(
-            #             f"val/env_{i}_true_Q",
-            #             torch.mean(t_Q),
-            #             batch_size=len(batch),
-            #         )
-
-            #     gen_actions = rearrange(
-            #         self.action_generator.generate(graph_states), "b o s -> (b o) s"
-            #     )
-            #     repeated_states = repeat(
-            #         graph_states, "b s -> (b o) s", o=self.action_generator.out_num
-            #     )
-            #     gen_pred_next_states = self.predictor(repeated_states, gen_actions)
-            #     gen_pred_rewards = self.value_prefix_net(
-            #         torch.stack([repeated_states, gen_pred_next_states], 1), None
-            #     )[0][:, 1]
-            #     gen_pred_values = self.value_net(gen_pred_next_states)
-            #     for i, g_Q in enumerate(
-            #         torch.chunk(
-            #             gen_pred_rewards + gen_pred_values, graph_states.size(0)
-            #         )
-            #     ):
-            #         self.log(
-            #             f"val/env_{i}_gen_Q",
-            #             torch.mean(g_Q),
-            #             batch_size=len(batch),
-            #         )
-
             case Agent.TrainStage.policy | Agent.TrainStage.explore:
                 bar: tqdm = self.trainer.progress_bar_callback.val_progress_bar
-                for sample_count, sim_count in [(1, 0), (4, 8)]:
+                for sample_count, sim_count in [(1, 0), (4, 8), (8, 24)]:
                     bar.set_description(f"Validation [{sample_count}/{sim_count}]")
                     env = Environment.from_graphs(
                         [
@@ -2541,7 +2128,7 @@ class Agent(L.LightningModule):
                     )
                     while any(
                         [
-                            np.min([g.get_timestamp() for g in gs])
+                            np.mean([g.get_timestamp() for g in gs])
                             < self.baseline[i] * 2
                             for i, gs in enumerate(
                                 batched(env.envs, self.val_predict_num)
@@ -2552,7 +2139,7 @@ class Agent(L.LightningModule):
                         if len(obs) == 0:
                             break
 
-                        actions, _ = self.single_step_predict(
+                        actions, _ = self.model.single_step_predict(
                             [g for g in env.envs if not g.finished()],
                             sample_count,
                             sim_count,

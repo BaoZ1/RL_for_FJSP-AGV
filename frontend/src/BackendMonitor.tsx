@@ -2,7 +2,7 @@
 
 import { useEffect, useState, FC } from "react";
 import { listen } from '@tauri-apps/api/event';
-import { Button, List, Flex } from "antd"
+import { Button, Flex } from "antd"
 import { invoke } from "@tauri-apps/api/core";
 import { css } from "@emotion/react";
 
@@ -21,6 +21,7 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
 
   useEffect(() => {
     let unlisten = listen<string>("backend_message", (msg) => {
+      console.log(msg.payload)
       setBackendMsgs((prev) => [...prev, {type: MsgType.message, content: msg.payload}])
     })
 
@@ -31,6 +32,7 @@ const BackendMonitor: FC<{ className?: string }> = ({ className }) => {
 
   useEffect(() => {
     let unlisten = listen<string>("backend_error", (err) => {
+      console.log(err.payload)
       setBackendMsgs((prev) => [...prev, { type: MsgType.error, content: err.payload }])
     })
 

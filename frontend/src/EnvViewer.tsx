@@ -2,18 +2,12 @@
 
 import { useEffect, useState, MouseEvent, WheelEvent, useRef, useLayoutEffect } from "react"
 import {
-  Button, Card, Flex, FloatButton, Layout, Splitter,
-  Typography, Dropdown, InputNumber, Modal, Timeline, TimelineItemProps, Empty,
-  Progress,
-  Space,
-  Slider,
+  Button, Card, Flex, FloatButton, Layout, Splitter,  Typography, Dropdown, 
+  InputNumber, Modal, Timeline, TimelineItemProps, Empty,  Progress,  Slider,
 } from "antd"
 import {
-  BaseFC, operationStatusMapper, OperationStatus, OperationStatusIdx, Action,
-  AGVState, EnvState, MachineState, OperationState, actionStatusMapper,
-  Paths,
-  AGVStatusMapper,
-  MachineStatusMapper
+  BaseFC, operationStatusMapper, OperationStatus, Action,  AGVState, EnvState, MachineState, 
+  OperationState, actionStatusMapper,  Paths,  AGVStatusMapper,  MachineStatusMapper
 } from "./types"
 import { css } from "@emotion/react"
 import { offset, useClientPoint, useFloating, useHover, useInteractions } from "@floating-ui/react"
@@ -601,7 +595,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const [modelPaths, setModelPaths] = useState<string[]>([])
   const [selectedModelPath, setSelectedModelPath] = useState<string | null>(null)
   const [sampleCount, setSampleCount] = useState<number>(4)
-  const [simCount, setSimCount] = useState<number>(20)
+  const [simCount, setSimCount] = useState<number>(8)
 
   const [paths, setPaths] = useState<Paths>({})
   const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
@@ -660,18 +654,55 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
         simCount,
         (progress) => {
           setRecords((prevs) => {
-            if (!ac.signal.aborted) {
+            const merge_waits = (list: typeof prevs, idx: number) => {
+              idx += list.length
+              if (
+                list[idx] === undefined
+                || list[idx + 1] === undefined
+                || typeof list[idx].info === "string" 
+                || typeof list[idx + 1].info === "string"
+                // @ts-ignore;
+                || actionStatusMapper[list[idx].info.action_type] !== "wait"
+                // @ts-ignore;
+                || actionStatusMapper[list[idx + 1].info.action_type] !== "wait" 
+              ) {
+                return list
+              }
               return [
-                ...prevs,
-                {
-                  time: progress.graph_state.timestamp,
-                  info: progress.action,
-                  state: progress.graph_state
-                }
+                ...list.slice(0, idx),
+                ...list.slice(idx + 1)
               ]
             }
-            else {
-              return [...prevs]
+            if (
+              prevs[prevs.length - 1].info === "finished"
+              || prevs[prevs.length - 1].info === "interrupted"
+            ) {
+              return merge_waits(
+                [
+                  ...prevs.slice(0, -1),
+                  {
+                    time: progress.graph_state.timestamp,
+                    info: progress.action,
+                    state: progress.graph_state
+                  },
+                  {
+                    time: progress.graph_state.timestamp,
+                    info: prevs[prevs.length - 1].info,
+                    state: progress.graph_state
+                  }
+                ], -3)
+            } else {
+              return merge_waits(
+                [
+                  ...prevs,
+                  {
+                    time: progress.graph_state.timestamp,
+                    info: progress.action,
+                    state: progress.graph_state
+                  }
+                ],
+                -2
+              )
             }
           })
           setProgress([progress.round_count, progress.total_step, progress.finished_step])

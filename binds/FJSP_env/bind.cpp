@@ -40,12 +40,16 @@ PYBIND11_MODULE(FJSP_env, m)
         .def("__repr__", &Product::repr);
 
     py::class_<Operation, shared_ptr<Operation>>(m, "Operation")
+        .def_readonly("status", &Operation::status)
+        .def_readonly("processing_machine", &Operation::processing_machine)
         .def("__repr__", &Operation::repr);
 
     py::class_<Machine, shared_ptr<Machine>>(m, "Machine")
+        .def_readonly("status", &Machine::status)
         .def("__repr__", &Machine::repr);
 
     py::class_<AGV, shared_ptr<AGV>>(m, "AGV")
+        .def_readonly("status", &AGV::status)
         .def("__repr__", &AGV::repr);
 
     py::class_<Action, shared_ptr<Action>>(m, "Action")

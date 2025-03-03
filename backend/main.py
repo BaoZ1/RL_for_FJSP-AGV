@@ -20,14 +20,14 @@ import torch.jit
 torch.jit.script_method = script_method
 torch.jit.script = script
 
-from FJSP_model.modules import Agent
+from FJSP_model.modules import Agent, Model
 
 
 import torch.cuda
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-models: dict[str, Agent] = {}
+models: dict[str, Model] = {}
 
 app = FastAPI()
 
@@ -130,7 +130,7 @@ async def remove_machine(
     id: Annotated[int, Query()],
 ) -> EnvState:
     if id == Graph.dummy_machine_id:
-        return PlainTextResponse("不可删除设备0", 400)
+        return PlainTextResponse("不可删除0号设备", 400)
     graph.remove_machine(id)
     return graph
 
@@ -172,7 +172,7 @@ async def model_list():
 
 @app.get("/model/load")
 async def load_model(model_path: Annotated[str, Query()]):
-    model = Agent.load_from_checkpoint(model_path, envs=None, finished_batch_count=0)
+    model = Agent.load_from_checkpoint(model_path, envs=None).model
     model.to(device)
     model.eval()
     models[model_path] = model
@@ -191,7 +191,7 @@ async def predict(
     sim_count: Annotated[int, Query()],
 ):
     await websocket.accept()
-    graph = use_graph(EnvState.model_validate(await websocket.receive_json()))
+    graph = use_graph(EnvState.model_validate(await websocket.receive_json())).init()
     try:
         match model_path:
             case "useful_first":
