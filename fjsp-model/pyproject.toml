@@ -6,10 +6,17 @@ dependencies = [
     "einops>=0.8.1",
     "fjsp-env>=0.1.0",
     "lightning>=2.5.0.post0",
-    "tensorboard>=2.19.0",
+    "onnxruntime>=1.21.0",
+    "onnxruntime-directml>=1.21.0",
     "torch>=2.6.0",
     "torch-geometric>=2.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "tensorboard>=2.19.0",
     "tqdm>=4.67.1",
+    "onnxscript>=0.2.2",
 ]
 
 

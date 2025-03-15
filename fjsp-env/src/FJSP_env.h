@@ -178,7 +178,9 @@ public:
     void act_pick(AGVId, MachineId, Product);
     void act_transport(AGVId, MachineId);
     void act_wait();
-    shared_ptr<Graph> act(Action) const;
+
+    float calc_reward(Action, const shared_ptr<Graph>) const;
+    tuple<shared_ptr<Graph>, float> act(Action) const;
 
     void wait_operation();
     void wait_AGV();

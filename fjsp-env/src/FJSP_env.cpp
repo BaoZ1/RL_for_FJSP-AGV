@@ -749,10 +749,19 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     MachineType min_machine_type = Graph::dummy_machine_type + 1;
     MachineType max_machine_type = Graph::dummy_machine_type + param.machine_type_count;
     uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
-    uniform_real_distribution<float> machine_pos_x_dist(5, 50);
-    uniform_real_distribution<float> machine_pos_y_dist(5, 50);
-    vector<MachineId> machines{Graph::dummy_machine_id};
+    uniform_int_distribution<int> machine_pos_x_base_dist(-8, 8);
+    uniform_real_distribution<float> machine_pos_x_offset_dist(-3, 3);
+    auto machine_pos_x_dist = [&machine_pos_x_base_dist, &machine_pos_x_offset_dist](auto& eg){
+        return machine_pos_x_base_dist(eg) * 5 + machine_pos_x_offset_dist(eg);
+    };
+    uniform_int_distribution<int> machine_pos_y_base_dist(-8, 8);
+    uniform_real_distribution<float> machine_pos_y_offset_dist(-3, 3);
+    auto machine_pos_y_dist = [&machine_pos_y_base_dist, &machine_pos_y_offset_dist](auto& eg)
+    {
+        return machine_pos_y_base_dist(eg) * 5 + machine_pos_y_offset_dist(eg);
+    };
 
+    vector<MachineId> machines{Graph::dummy_machine_id};
     for (MachineType t = min_machine_type; t <= max_machine_type; t++)
     {
         Position pos{machine_pos_x_dist(engine), machine_pos_y_dist(engine)};
@@ -1482,33 +1491,83 @@ void Graph::act_wait()
     }
 }
 
-shared_ptr<Graph> Graph::act(Action action) const
+float Graph::calc_reward(Action action, const shared_ptr<Graph> next_g) const
+{
+    /*
+        reward = 0
+            action = actions[action_idx]
+            if action.action_type in (ActionType.pick, ActionType.transport):
+                reward += 3
+            elif action.action_type == ActionType.move:
+                reward += -0.05
+            new_env = env.act(action)
+            if action.action_type == ActionType.wait:
+                for oid in env.get_operations_id():
+                    op = env.get_operation(oid)
+                    new_op = new_env.get_operation(oid)
+                    if new_op.status != op.status:
+                        reward += 0.5
+                        if new_op.status == OperationStatus.processing:
+                            reward += 4
+    */
+    float reward = 0;
+    switch (action.type)
+    {
+    case ActionType::pick:
+    case ActionType::transport:
+        reward += 3;
+        break;
+    case ActionType::move:
+        reward -= 0.5;
+        break;
+    case ActionType::wait:
+    {
+        for (auto [id, o1] : this->operations)
+        {
+            auto o2 = next_g->operations.at(id);
+            if (o2->status != o1->status)
+            {
+                reward += 0.5;
+                if (o2->status == OperationStatus::processing)
+                {
+                    reward += 4;
+                }
+            }
+        }
+    }
+    break;
+    }
+
+    return reward;
+}
+
+tuple<shared_ptr<Graph>, float> Graph::act(Action action) const
 {
     assert(this->inited);
     assert(!this->finished());
 
-    auto ret = this->copy();
+    auto next_g = this->copy();
 
     switch (action.type)
     {
     case ActionType::move:
-        ret->act_move(action.act_AGV.value(), action.target_machine.value());
+        next_g->act_move(action.act_AGV.value(), action.target_machine.value());
         break;
 
     case ActionType::pick:
-        ret->act_pick(action.act_AGV.value(), action.target_machine.value(), action.target_product.value());
+        next_g->act_pick(action.act_AGV.value(), action.target_machine.value(), action.target_product.value());
         break;
 
     case ActionType::transport:
-        ret->act_transport(action.act_AGV.value(), action.target_machine.value());
+        next_g->act_transport(action.act_AGV.value(), action.target_machine.value());
         break;
     case ActionType::wait:
-        ret->act_wait();
+        next_g->act_wait();
         break;
     default:
         assert(false);
     }
-    return ret;
+    return {next_g, this->calc_reward(action, next_g)};
 }
 
 void Graph::wait_operation()

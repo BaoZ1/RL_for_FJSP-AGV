@@ -69,28 +69,34 @@ function BuildFrontend {
     if ($updateBackend) {
         Set-Location "$($root)/backend"
 
-        pyinstaller main.py --noconfirm
+        .venv/Scripts/activate.ps1
+        
+        cxfreeze build
 
-        Set-Location $root
-
+        deactivate
+        
         $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
 
-        Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
+        Rename-Item "build/main/main.exe" "FJSP-AGV_backend-$($prefix).exe"
 
-        if (Test-Path "frontend/src-tauri/target/$($mode)/_internal") {
-            Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
-        }
+        # Set-Location $root
+
+        # Move-Item "backend/dist/main/main.exe" "frontend/src-tauri/binaries/FJSP-AGV_backend-$($prefix).exe" -Force
+
+        # if (Test-Path "frontend/src-tauri/target/$($mode)/_internal") {
+        #     Remove-Item "frontend/src-tauri/target/$($mode)/_internal" -Recurse -Force
+        # }
         
-        $moved = $false
-        do {
-            try {
-                Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force -ErrorAction Stop
-                $moved = $true
-            }
-            catch {
-                Start-Sleep -Seconds 2
-            }
-        } while (-Not $moved)
+        # $moved = $false
+        # do {
+        #     try {
+        #         Move-Item "backend/dist/main/_internal" "frontend/src-tauri/target/$($mode)" -Force -ErrorAction Stop
+        #         $moved = $true
+        #     }
+        #     catch {
+        #         Start-Sleep -Seconds 2
+        #     }
+        # } while (-Not $moved)
     }
 
     Set-Location "$($root)/frontend"

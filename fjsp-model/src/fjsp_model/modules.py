@@ -288,13 +288,13 @@ class StateMixer(nn.Module):
 
         type_dict: dict[NodeType, Tensor] = self.convs(node_dict, edge_index_dict)
         type_features = [
-            type_dict[f"{name}_global"] for name in ["operation", "machine", "AGV"]
+            type_dict[f"{name}_global"].squeeze(0) for name in ["operation", "machine", "AGV"]
         ]
 
         graph_feature = self.graph_mix(
             torch.cat(
                 [global_attr] + type_features,
-                1,
+                0,
             )
         )
 
@@ -379,11 +379,9 @@ class StateExtract(nn.Module):
         edge_index_dict: dict[EdgeType, Tensor],
         edge_attr_dict: dict[EdgeType, Tensor],
     ):
-        global_attr = global_attr.unsqueeze(0)
-
         for k, v in x_dict.items():
             x_dict[k] = self.init_project[k](v)
-
+  
         for layer in self.backbone:
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
 
@@ -404,7 +402,6 @@ class StateExtract(nn.Module):
 
         for layer in self.backbone:
             x_dict = layer(x_dict, edge_index_dict, edge_attr_dict)
-
         (
             global_dict,
             graph_feature,
@@ -883,7 +880,7 @@ class Node:
         for child in self.children:
             if child.expanded():
                 sum_p_q += probs[child.index] * (
-                    child.reward + Agent.discount * child.value()
+                    child.reward + 1.0 * child.value()
                 )
                 sum_prob += probs[child.index]
                 sum_visit += child.visit_count
@@ -896,7 +893,7 @@ class Node:
 
         completed_Qs = [
             (
-                (child.reward + Agent.discount * child.value())
+                (child.reward + 1.0 * child.value())
                 if child.expanded()
                 else v_mix
             )
@@ -1007,6 +1004,19 @@ class MCTS:
             get_offsets(batched_graph),
             [o.mapper for o in obs],
         )
+
+        if root_sample_count == 1:
+            idxs = []
+            policies = []
+            for state, action_embs in zip(graph_states, actions_embs):
+                logits = self.policy_net(state, action_embs)
+                idxs.append(torch.argmax(logits).item())
+                policies.append(logits)
+            return (
+                idxs,
+                self.value_net(graph_states),
+                policies,
+            )
 
         roots: list[RootNode] = []
         for ((graph, state, actions, actions_emb, value),) in zip(
@@ -1127,7 +1137,7 @@ class MCTS:
                         node.visit_count += 1
                         node.value_list.append(value.item())
                         if (p := node.parent) is not None:
-                            value = node.reward + Agent.discount * value
+                            value = node.reward + 1.0 * value
                             node = p
                         else:
                             break
@@ -1298,8 +1308,7 @@ class Model(nn.Module):
 
 
 class Agent(L.LightningModule):
-    discount = 1
-
+    
     class TrainStage(IntEnum):
         encode = auto()
         _value = auto()
@@ -2110,7 +2119,7 @@ class Agent(L.LightningModule):
         match self.stage:
             case Agent.TrainStage.policy | Agent.TrainStage.explore:
                 bar: tqdm = self.trainer.progress_bar_callback.val_progress_bar
-                for sample_count, sim_count in [(1, 0), (4, 8), (8, 24)]:
+                for sample_count, sim_count in [(1, 0), (2, 8), (4, 32)]:
                     bar.set_description(f"Validation [{sample_count}/{sim_count}]")
                     env = Environment.from_graphs(
                         [

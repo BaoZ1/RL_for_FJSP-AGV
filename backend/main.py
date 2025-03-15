@@ -5,30 +5,32 @@ import uvicorn
 from pathlib import Path
 from models import *
 from fjsp_env import *
+import json
 
 
-def script_method(fn, _rcb=None):
-    return fn
+# def script_method(fn, _rcb=None):
+#     return fn
 
 
-def script(obj, optimize=True, _frames_up=0, _rcb=None):
-    return obj
+# def script(obj, optimize=True, _frames_up=0, _rcb=None):
+#     return obj
 
 
-import torch.jit
+# import torch.jit
 
-torch.jit.script_method = script_method
-torch.jit.script = script
+# torch.jit.script_method = script_method
+# torch.jit.script = script
 
-from fjsp_model.modules import Agent, Model
-from fjsp_model.utils import simple_predict, single_step_useful_first_predict, single_step_useful_only_predict
+# from fjsp_model.modules import Agent, Model
+from embed.agent import Agent
+# from fjsp_model.utils import simple_predict, single_step_useful_first_predict, single_step_useful_only_predict
 
 
-import torch.cuda
+# import torch.cuda
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
 
-models: dict[str, Model] = {}
+models: dict[str, Agent] = {}
 
 app = FastAPI()
 
@@ -173,10 +175,7 @@ async def model_list():
 
 @app.get("/model/load")
 async def load_model(model_path: Annotated[str, Query()]):
-    model = Agent.load_from_checkpoint(model_path, envs=None).model
-    model.to(device)
-    model.eval()
-    models[model_path] = model
+    models[model_path] = Agent(Path(model_path))
 
 
 @app.get("/model/remove")
@@ -195,16 +194,16 @@ async def predict(
     graph = use_graph(EnvState.model_validate(await websocket.receive_json())).init()
     try:
         match model_path:
-            case "useful_first":
-                predictor = simple_predict(
-                    graph,
-                    single_step_useful_first_predict,
-                )
-            case "useful_only":
-                predictor = simple_predict(
-                    graph,
-                    single_step_useful_only_predict,
-                )
+            # case "useful_first":
+            #     predictor = simple_predict(
+            #         graph,
+            #         single_step_useful_first_predict,
+            #     )
+            # case "useful_only":
+            #     predictor = simple_predict(
+            #         graph,
+            #         single_step_useful_only_predict,
+            #     )
             case _:
                 predictor = models[model_path].predict(
                     graph,

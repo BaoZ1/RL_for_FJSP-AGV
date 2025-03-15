@@ -31,8 +31,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
     "externalBin": [
-        "binaries/FJSP-AGV_backend"
-    ]
+      "../../backend/build/main/FJSP-AGV_backend"
+    ],
+    "resources": {
+      "../../backend/build/main/*.dll": "./",
+      "../../backend/build/main/lib/": "lib"
+    }
   }
 }

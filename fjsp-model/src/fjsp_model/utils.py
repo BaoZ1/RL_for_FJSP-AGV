@@ -313,7 +313,7 @@ class Environment:
         for n in count(1):
             ob = Observation.from_env(env)
             action, _ = single_step_useful_first_predict(ob)
-            env = env.act(action)
+            env, _ = env.act(action)
             if env.finished():
                 return True
 
@@ -338,21 +338,22 @@ class Environment:
         for i, (env, prev_lb) in enumerate(zip(self.envs, self.prev_lbs)):
             if env.finished():
                 continue
-            reward = 0
             action = actions[action_idx]
-            if action.action_type in (ActionType.pick, ActionType.transport):
-                reward += 3
-            elif action.action_type == ActionType.move:
-                reward += -0.05
-            new_env = env.act(action)
-            if action.action_type == ActionType.wait:
-                for oid in env.get_operations_id():
-                    op = env.get_operation(oid)
-                    new_op = new_env.get_operation(oid)
-                    if new_op.status != op.status:
-                        reward += 0.5
-                        if new_op.status == OperationStatus.processing:
-                            reward += 4
+            new_env, reward = env.act(action)
+            # reward = 0
+            # if action.action_type in (ActionType.pick, ActionType.transport):
+            #     reward += 3
+            # elif action.action_type == ActionType.move:
+            #     reward += -0.05
+            # new_env = env.act(action)
+            # if action.action_type == ActionType.wait:
+            #     for oid in env.get_operations_id():
+            #         op = env.get_operation(oid)
+            #         new_op = new_env.get_operation(oid)
+            #         if new_op.status != op.status:
+            #             reward += 0.5
+            #             if new_op.status == OperationStatus.processing:
+            #                 reward += 4
                         # if new_op.status == OperationStatus.finished:
                         #     ma = new_env.get_machine(new_op.processing_machine)
                         #     if ma.status == MachineStatus.working:
@@ -362,7 +363,7 @@ class Environment:
                 and len(new_actions := new_env.get_available_actions()) == 1
                 and new_actions[0].action_type == ActionType.wait
             ):
-                new_env = new_env.act(new_actions[0])
+                new_env, _ = new_env.act(new_actions[0])
             action_idx += 1
             new_lb = new_env.finish_time_lower_bound()
             d_lb = new_lb - prev_lb

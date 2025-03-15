@@ -2,7 +2,13 @@
 name = "fjsp-env"
 version = "0.1.0"
 requires-python = ">=3.12"
+dependencies = []
 
+[dependency-groups]
+dev = [
+    "pybind11>=2.13.6",
+    "scikit-build-core[pyproject]>=0.11.0",
+]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

@@ -5,7 +5,6 @@ from lightning import Trainer
 from lightning.pytorch.callbacks import TQDMProgressBar
 
 
-
 train_env = Environment(
     32,
     [
@@ -88,7 +87,7 @@ train_env = Environment(
 
 model = Agent(
     train_env,
-    1e-8,
+    1e-6,
     8,
     5,
     270,
@@ -102,22 +101,21 @@ model = Agent(
     (512, 328, 328),
     (5, 4, 4),
     768,
-    8,
-    768,
     6,
+    768,
+    8,
     1024,
     6,
-    16,
+    4,
     64,
     5,
-    Agent.TrainStage.encode,
+    Agent.TrainStage.policy,
 )
 
 # model.load(
-#     r"lightning_logs\version_9\checkpoints\epoch=14-step=150.ckpt",
+#     r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
 #     Agent.TrainStage.policy,
 # )
-
 
 
 model.compile_modules()
@@ -133,5 +131,5 @@ trainer = Trainer(
 )
 trainer.fit(
     model,
-    # ckpt_path=r"lightning_logs\version_10\checkpoints\epoch=29-step=300.ckpt",
+    ckpt_path=r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
 )

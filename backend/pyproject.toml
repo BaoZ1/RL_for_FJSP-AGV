@@ -3,13 +3,28 @@ name = "backend"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "cx-freeze>=7.2.10",
+    "embed>=0.1.0",
     "fastapi>=0.115.11",
     "fjsp-env>=0.1.0",
-    "fjsp-model>=0.1.0",
-    "pyinstaller>=6.12.0",
     "uvicorn>=0.34.0",
+    "websockets>=15.0",
 ]
 
 [tool.uv.sources]
 fjsp-env = { path = "../fjsp-env" }
-fjsp-model = { path = "../fjsp-model" }
+embed = { path = "../embed" }
+
+[tool.cxfreeze]
+executables = [
+    {script = "main.py"}
+]
+
+[tool.cxfreeze.build_exe]
+build_exe = "build/main"
+packages = ["fastapi", "fjsp_env", "embed", "uvicorn", "websockets"]
+# packages = ["fastapi", "fjsp_env", "fjsp_model", "torch", "torch_geometric", "uvicorn", "websockets"]
+# excludes = ["torch_geometric.nn"]
+# include_files = [
+#     [".venv/Lib/site-packages/torch_geometric/nn", "lib/torch_geometric/nn"]
+# ]

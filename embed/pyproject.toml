@@ -4,8 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "fjsp-env>=0.1.0",
-    "onnxruntime-gpu>=1.20.1",
+    "onnxruntime-gpu>=1.21.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.uv.sources]
 fjsp-env = { path = "../fjsp-env" }

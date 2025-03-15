@@ -595,7 +595,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const [modelPaths, setModelPaths] = useState<string[]>([])
   const [selectedModelPath, setSelectedModelPath] = useState<string | null>(null)
   const [sampleCount, setSampleCount] = useState<number>(4)
-  const [simCount, setSimCount] = useState<number>(8)
+  const [simCount, setSimCount] = useState<number>(32)
 
   const [paths, setPaths] = useState<Paths>({})
   const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
@@ -616,7 +616,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
 
 
   const loadNewModel = async () => {
-    const path = await open()
+    const path = await open({directory: true})
     if (path !== null) {
       if (modelPaths.find((p) => p === path) === undefined) {
         await loadModel(path)
