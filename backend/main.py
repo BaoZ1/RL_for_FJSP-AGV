@@ -6,29 +6,8 @@ from pathlib import Path
 from models import *
 from fjsp_env import *
 import json
-
-
-# def script_method(fn, _rcb=None):
-#     return fn
-
-
-# def script(obj, optimize=True, _frames_up=0, _rcb=None):
-#     return obj
-
-
-# import torch.jit
-
-# torch.jit.script_method = script_method
-# torch.jit.script = script
-
-# from fjsp_model.modules import Agent, Model
 from embed.agent import Agent
-# from fjsp_model.utils import simple_predict, single_step_useful_first_predict, single_step_useful_only_predict
-
-
-# import torch.cuda
-
-# device = "cuda" if torch.cuda.is_available() else "cpu"
+from embed.utils import *
 
 models: dict[str, Agent] = {}
 
@@ -53,17 +32,10 @@ async def get_local_env(
 
 @app.post("/env/save")
 async def save_local_env(
-    path: Annotated[Path, Query()], graph: Annotated[Graph, Depends(use_graph)]
-):
-    path.write_text(json.dumps(graph.get_state()))
-
-
-@app.post("/env/local")
-async def set_local_save(
+    graph: Annotated[Graph, Depends(use_graph)],
     path: Annotated[Path, Query()],
-    state: Annotated[EnvState, Body()],
-) -> None:
-    path.write_text(state.model_dump_json())
+):
+    path.write_text(EnvState.model_validate(graph).model_dump_json())
 
 
 @app.get("/env/rand")
@@ -85,7 +57,7 @@ async def reset_env(graph: Annotated[Graph, Depends(use_graph)]) -> EnvState:
 
 @app.post("/env/paths")
 async def get_paths(
-    graph: Annotated[Graph, Depends(use_graph)]
+    graph: Annotated[Graph, Depends(use_graph)],
 ) -> dict[int, dict[int, tuple[list[int], float]]]:
     graph.calc_distance()
     return graph.get_paths()
@@ -109,6 +81,26 @@ async def remove_operation(
     id: Annotated[int, Query()],
 ) -> EnvState:
     graph.remove_operation(id)
+    return graph
+
+
+@app.put("/relation/add")
+async def add_relation(
+    graph: Annotated[Graph, Depends(use_graph)],
+    a: Annotated[int, Query()],
+    b: Annotated[int, Query()],
+) -> EnvState:
+    graph.add_relation(a, b)
+    return graph
+
+
+@app.put("/relation/remove")
+async def remove_relation(
+    graph: Annotated[Graph, Depends(use_graph)],
+    a: Annotated[int, Query()],
+    b: Annotated[int, Query()],
+) -> EnvState:
+    graph.remove_relation(a, b)
     return graph
 
 
@@ -194,16 +186,16 @@ async def predict(
     graph = use_graph(EnvState.model_validate(await websocket.receive_json())).init()
     try:
         match model_path:
-            # case "useful_first":
-            #     predictor = simple_predict(
-            #         graph,
-            #         single_step_useful_first_predict,
-            #     )
-            # case "useful_only":
-            #     predictor = simple_predict(
-            #         graph,
-            #         single_step_useful_only_predict,
-            #     )
+            case "useful_first":
+                predictor = simple_predict(
+                    graph,
+                    single_step_useful_first_predict,
+                )
+            case "useful_only":
+                predictor = simple_predict(
+                    graph,
+                    single_step_useful_only_predict,
+                )
             case _:
                 predictor = models[model_path].predict(
                     graph,

@@ -10,7 +10,7 @@ from torch_geometric.utils.hetero import check_add_self_loops
 from torch_geometric.nn.module_dict import ModuleDict
 from torch_geometric.typing import NodeType, EdgeType
 from fjsp_env import Graph, Action, ActionType, IdIdxMapper
-from .utils import *
+from utils import *
 import lightning as L
 from lightning.pytorch.core.optimizer import LightningOptimizer
 from lightning.pytorch.trainer.states import RunningStage
@@ -1557,7 +1557,8 @@ class Agent(L.LightningModule):
         )
         explore_sch = lr_scheduler.StepLR(
             explore_opt,
-            0.9,
+            self.opt_step_size,
+            0.93,
         )
 
         return [
@@ -2105,7 +2106,7 @@ class Agent(L.LightningModule):
                 # value_stage_sch.step()
                 # policy_sch.step()
                 self.explore_stage(items, explore_opt)
-                # explore_sch.step()
+                explore_sch.step()
             case Agent.TrainStage.explore:
                 self.explore_stage(items, explore_opt)
                 # explore_sch.step()
@@ -2132,7 +2133,7 @@ class Agent(L.LightningModule):
                     while any(
                         [
                             np.mean([g.get_timestamp() for g in gs])
-                            < self.baseline[i] * 2
+                            < self.baseline[i] * 1.2
                             for i, gs in enumerate(
                                 batched(env.envs, self.val_predict_num)
                             )

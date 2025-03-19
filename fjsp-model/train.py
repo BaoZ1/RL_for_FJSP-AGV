@@ -1,8 +1,8 @@
 from fjsp_env import *
-from fjsp_model.modules import *
-from fjsp_model.utils import *
+from modules import *
+from utils import *
 from lightning import Trainer
-from lightning.pytorch.callbacks import TQDMProgressBar
+from lightning.pytorch.callbacks import TQDMProgressBar, ModelCheckpoint
 
 
 train_env = Environment(
@@ -93,29 +93,29 @@ model = Agent(
     270,
     240,
     24,
-    (128, 96, 96),
-    (768, 512, 512),
-    1024,
+    (64, 48, 48),
+    (256, 192, 192),
+    384,
     5,
-    256,
-    (512, 328, 328),
+    128,
+    (256, 192, 192),
     (5, 4, 4),
-    768,
-    6,
-    768,
-    8,
-    1024,
+    384,
+    4,
+    512,
+    5,
+    512,
     6,
     4,
-    64,
+    32,
     5,
-    Agent.TrainStage.policy,
+    Agent.TrainStage.explore,
 )
 
-# model.load(
-#     r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
-#     Agent.TrainStage.policy,
-# )
+model.load(
+    r"lightning_logs\version_5\checkpoints\epoch=59-step=600.ckpt",
+    Agent.TrainStage.policy,
+)
 
 
 model.compile_modules()
@@ -131,5 +131,5 @@ trainer = Trainer(
 )
 trainer.fit(
     model,
-    ckpt_path=r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
+    # ckpt_path=r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
 )

@@ -2,16 +2,20 @@
 
 import { useEffect, useState, MouseEvent, WheelEvent, useRef, useLayoutEffect } from "react"
 import {
-  Button, Card, Flex, FloatButton, Layout, Splitter,  Typography, Dropdown, 
-  InputNumber, Modal, Timeline, TimelineItemProps, Empty,  Progress,  Slider,
+  Button, Card, Flex, FloatButton, Layout, Splitter, Typography, Dropdown,
+  InputNumber, Modal, Timeline, TimelineItemProps, Empty, Progress, Slider,
+  Popover,
 } from "antd"
 import {
-  BaseFC, operationStatusMapper, OperationStatus, Action,  AGVState, EnvState, MachineState, 
-  OperationState, actionStatusMapper,  Paths,  AGVStatusMapper,  MachineStatusMapper
+  BaseFC, operationStatusMapper, OperationStatus, Action, AGVState, EnvState, MachineState,
+  OperationState, actionStatusMapper, Paths, AGVStatusMapper, MachineStatusMapper,
+  AGVStatus
 } from "./types"
 import { css } from "@emotion/react"
 import { offset, useClientPoint, useFloating, useHover, useInteractions } from "@floating-ui/react"
-import { AimOutlined, CaretRightFilled, ClockCircleOutlined, CloseOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import {
+  AimOutlined, CaretRightFilled, ClockCircleOutlined, CloseOutlined, LeftOutlined, RightOutlined
+} from '@ant-design/icons'
 import { getPaths, initEnv, loadModel, modelList, predict, removeModel } from "./backend-api"
 import { open } from "@tauri-apps/plugin-dialog"
 
@@ -24,73 +28,102 @@ const operationColor = {
 } as const satisfies Record<OperationStatus, string>
 
 const OperationNode: BaseFC<{
-  timestamp: number,
   operation: OperationState,
   pos: { x: number, y: number },
   radius: number,
-  scaleRate: number
+  scaleRate: number,
+  state: EnvState,
 }> = (props) => {
   const scaleRateRef = useRef(props.scaleRate)
   useEffect(() => { scaleRateRef.current = props.scaleRate }, [props.scaleRate])
 
   return (
-    <div className={props.className}
-      css={css`
-        width: ${props.radius * 2}px;
-        height: ${props.radius * 2}px;
-        border-radius: ${props.radius}px;
-        border: 2px solid black;
-        transform: translate(-50%, -50%);
-        position: absolute;
-        left: ${props.pos.x}px;
-        top: ${props.pos.y}px;
-        background-color: ${operationColor[operationStatusMapper[props.operation.status]]};
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        z-index: 1;
-      `}
-    >
-      {props.operation.id}
-      {
-        (
-          () => {
-            const style = css`
+    <Popover mouseEnterDelay={0} mouseLeaveDelay={0} title={`工序 ${props.operation.id}`} content={
+      <>
+        <p>状态: {operationStatusMapper[props.operation.status]}</p>
+        <p>生产设备: {props.operation.processing_machine || "--"}</p>
+        <p>
+          进度: {
+            (() => {
+              switch (operationStatusMapper[props.operation.status]) {
+                case "blocked":
+                  const finished_count = props.operation.predecessors
+                    .map((p) => props.state.operations.find((op) => op.id === p)!)
+                    .filter((op) => operationStatusMapper[op.status] === "finished")
+                    .length
+                  return `${finished_count} / ${props.operation.predecessors.length}`
+                case "unscheduled":
+                  return "--"
+                case "waiting":
+                  return `${props.operation.arrived_preds.length} / ${props.operation.predecessors.length}`
+                case "processing":
+                  return `${(props.operation.finish_timestamp - props.state.timestamp).toFixed(2)} / ${props.operation.process_time.toFixed(2)}`
+                case "finished":
+                  return `${props.operation.sent_succs.length} / ${props.operation.successors.length}`
+              }
+            })()
+          }
+        </p>
+      </>
+    }>
+      <div className={props.className}
+        css={css`
+          width: ${props.radius * 2}px;
+          height: ${props.radius * 2}px;
+          border-radius: ${props.radius}px;
+          border: 2px solid black;
+          transform: translate(-50%, -50%);
+          position: absolute;
+          left: ${props.pos.x}px;
+          top: ${props.pos.y}px;
+          background-color: ${operationColor[operationStatusMapper[props.operation.status]]};
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          z-index: 1;
+        `}
+      >
+        {props.operation.id}
+        {
+          (
+            () => {
+              const style = css`
               position: absolute;
               bottom: -15px;
             `
-            switch (operationStatusMapper[props.operation.status]) {
-              case "blocked":
-              case "unscheduled":
-              case "waiting":
-                {
-                  if (props.operation.predecessors.length !== 0) {
-                    const total = props.operation.predecessors.length
-                    const arrived = props.operation.arrived_preds.length
-                    return <Progress percent={arrived / total * 100} steps={total} showInfo={false} css={style} />
+              switch (operationStatusMapper[props.operation.status]) {
+                case "blocked":
+                case "unscheduled":
+                case "waiting":
+                  {
+                    if (props.operation.predecessors.length !== 0) {
+                      const total = props.operation.predecessors.length
+                      const arrived = props.operation.arrived_preds.length
+                      return <Progress percent={arrived / total * 100} steps={total} showInfo={false} css={style} />
+                    }
+                    break
                   }
-                  break
-                }
-              case "processing":
-                {
-                  const total = props.operation.process_time
-                  const rest = props.operation.finish_timestamp - props.timestamp
-                  return <Progress percent={(1 - rest / total) * 100} showInfo={false} css={style} />
-                }
-              case "finished":
-                {
-                  if (props.operation.successors.length !== 0) {
-                    const total = props.operation.successors.length
-                    const sent = props.operation.sent_succs.length
-                    return <Progress percent={sent / total * 100} steps={total} showInfo={false} css={style} />
+                case "processing":
+                  {
+                    const total = props.operation.process_time
+                    const rest = props.operation.finish_timestamp - props.state.timestamp
+                    return <Progress percent={(1 - rest / total) * 100} showInfo={false} css={style} />
                   }
-                  break
-                }
+                case "finished":
+                  {
+                    if (props.operation.successors.length !== 0) {
+                      const total = props.operation.successors.length
+                      const sent = props.operation.sent_succs.length
+                      return <Progress percent={sent / total * 100} steps={total} showInfo={false} css={style} />
+                    }
+                    break
+                  }
+              }
             }
-          }
-        )()
-      }
-    </div>
+          )()
+        }
+      </div>
+    </Popover>
   )
 }
 
@@ -360,7 +393,7 @@ const OperationViewer: BaseFC<{
         }
         {
           operationInfoList.map(({ id, pos }) => (
-            <OperationNode key={id} timestamp={props.timestamp}
+            <OperationNode key={id} state={props.state}
               operation={props.state.operations.find((item) => item.id === id)!}
               pos={pos} radius={nodeRadius} scaleRate={scaleRatio}
             />
@@ -380,48 +413,101 @@ const OperationViewer: BaseFC<{
 const MachineNode: BaseFC<{
   state: MachineState,
   operation: OperationState | undefined
+  all_state: EnvState,
 }> = (props) => {
-
   return (
-    <div className={props.className}
-      css={css`
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
-        background-color: gray;
-        border: 2px solid black;
-        display: flex;
-        justify-content: center;
-        align-items: center;
+    <Popover mouseEnterDelay={0} mouseLeaveDelay={0} title={`设备 ${props.state.id}`} content={
+      <>
+        <div css={css`
+          margin-top: 10px;
+        `}>
+          <h5>生产</h5>
+          <div css={css`
+            padding-left: 10px;
+          `}>
+            <p>生产中: {props.state.working_operation || "无"}</p>
+            <p>剩余时间: {(props.state.working_operation && props.all_state.operations.find((op) => op.id === props.state.working_operation)!.finish_timestamp - props.all_state.timestamp)?.toFixed(2) || "--"}</p>
+          </div>
+        </div>
+        <div>
+          <h5>等待中</h5>
+          <div css={css`
+            padding-left: 10px;
+          `}>
+            {
+              props.state.waiting_operations.length ?
+                props.state.waiting_operations.map((id) => {
+                  const op = props.all_state.operations.find((p) => p.id === id)!
+                  return (
+                    <p>{id}: {op.arrived_preds.length} / {op.predecessors.length}</p>
+                  )
+                }) : "--"
+            }
+          </div>
+        </div>
+        <div>
+          <h5>AGVs</h5>
+          <div css={css`
+            padding-left: 10px;
+          `}>
+            {
+              (["idle", "moving", "picking", "transporting"] as AGVStatus[]).map((status) => {
+                return (
+                  <p>
+                    {status}: [{
+                      props.all_state.AGVs
+                        .filter((a) => AGVStatusMapper[a.status] === status && a.target_machine == props.state.id)
+                        .map((a) => a.id)
+                        .join(", ")
+                    }]
+                  </p>
+                )
+              })
+            }
+          </div>
+        </div>
+      </>
+    }>
+      <div className={props.className}
+        css={css`
+          width: 50px;
+          height: 50px;
+          border-radius: 50%;
+          background-color: gray;
+          border: 2px solid black;
+          display: flex;
+          justify-content: center;
+          align-items: center;
       `}
-    >
-      {props.state.id}
-      {
-        MachineStatusMapper[props.state.status] === "working" && (
-          <>
-            <div css={css`
-              position: absolute;
-              top: 0;
-              right: 0;
-              translate: 30% -30%;
-              width: 25px;
-              height: 25px;
-              background-color: ${operationColor["processing"]};
-              color: black;
-              font-size: small;
-              border-radius: 50%;
-              border: 2px solid black;
-              overflow: hidden;
-              display: flex;
-              justify-content: center;
-              align-items: center;
+      >
+        {props.state.id}
+        {
+          MachineStatusMapper[props.state.status] === "working" && (
+            <>
+              <div css={css`
+                position: absolute;
+                top: 0;
+                right: 0;
+                translate: 30% -30%;
+                width: 25px;
+                height: 25px;
+                background-color: ${operationColor["processing"]};
+                color: black;
+                font-size: small;
+                border-radius: 50%;
+                border: 2px solid black;
+                overflow: hidden;
+                display: flex;
+                justify-content: center;
+                align-items: center;
             `}>
-              {props.operation!.id}
-            </div>
-          </>
-        )
-      }
-    </div>
+                {props.operation!.id}
+              </div>
+            </>
+          )
+        }
+      </div>
+    </Popover>
   )
 }
 
@@ -551,7 +637,7 @@ const MachineViewer: BaseFC<{
       `}>
         {
           props.state.machines.map((state) => (
-            <MachineNode key={state.id} state={state}
+            <MachineNode key={state.id} state={state} all_state={props.state}
               operation={props.state.operations.find((op) => state.working_operation === op.id)}
               css={css`
                 position: absolute;
@@ -598,8 +684,10 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   const [simCount, setSimCount] = useState<number>(32)
 
   const [paths, setPaths] = useState<Paths>({})
-  const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState }[]>([])
-  const [viewIdx, setViewIdx] = useState<number | null>(null)
+  const [records, setRecords] = useState<{ time: number, info: Action | string, state: EnvState, show: boolean }[]>([])
+  // const [viewIdx, setViewIdx] = useState<number | null>(null)
+  const [recordIdx, setRecordIdx] = useState<number | null>(null)
+  // const [viewRecordMapper, setViewRecordMapper] = useState<number[]>([])
   const [timestamp, setTimestamp] = useState<number>(0)
 
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false)
@@ -616,7 +704,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
 
 
   const loadNewModel = async () => {
-    const path = await open({directory: true})
+    const path = await open({ directory: true })
     if (path !== null) {
       if (modelPaths.find((p) => p === path) === undefined) {
         await loadModel(path)
@@ -635,8 +723,8 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   }
 
   const initProgress = async () => {
-    setRecords([{ time: 0, info: "init", state: await initEnv(props.state) }])
-    setViewIdx(null)
+    setRecords([{ time: 0, info: "init", state: await initEnv(props.state), show: true }])
+    setRecordIdx(null)
     setProgress([0, 0, 0])
   }
 
@@ -659,17 +747,20 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
               if (
                 list[idx] === undefined
                 || list[idx + 1] === undefined
-                || typeof list[idx].info === "string" 
+                || typeof list[idx].info === "string"
                 || typeof list[idx + 1].info === "string"
                 // @ts-ignore;
                 || actionStatusMapper[list[idx].info.action_type] !== "wait"
                 // @ts-ignore;
-                || actionStatusMapper[list[idx + 1].info.action_type] !== "wait" 
+                || actionStatusMapper[list[idx + 1].info.action_type] !== "wait"
               ) {
                 return list
               }
+              const prev_wait = list[idx]
+              prev_wait.show = false
               return [
                 ...list.slice(0, idx),
+                prev_wait,
                 ...list.slice(idx + 1)
               ]
             }
@@ -683,12 +774,14 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                   {
                     time: progress.graph_state.timestamp,
                     info: progress.action,
-                    state: progress.graph_state
+                    state: progress.graph_state,
+                    show: true,
                   },
                   {
                     time: progress.graph_state.timestamp,
                     info: prevs[prevs.length - 1].info,
-                    state: progress.graph_state
+                    state: progress.graph_state,
+                    show: true
                   }
                 ], -3)
             } else {
@@ -698,7 +791,8 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                   {
                     time: progress.graph_state.timestamp,
                     info: progress.action,
-                    state: progress.graph_state
+                    state: progress.graph_state,
+                    show: true
                   }
                 ],
                 -2
@@ -717,7 +811,8 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
           {
             time: lastState.timestamp,
             info: "finished",
-            state: lastState
+            state: lastState,
+            show: true
           }
         ]
       })
@@ -729,7 +824,8 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
           {
             time: lastState.timestamp,
             info: "interrupted",
-            state: lastState
+            state: lastState,
+            show: true
           }
         ]
       })
@@ -740,7 +836,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
   }
 
   const jumpToRecord = (idx: number | null) => {
-    setViewIdx(idx)
+    setRecordIdx(idx)
     setTimestamp(idx !== null ? records[idx].time : 0)
   }
 
@@ -748,7 +844,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
     setTimestamp(timestamp)
     let targetIdx = -1
     records.forEach((record) => targetIdx += +(record.time <= timestamp))
-    setViewIdx(Math.max(targetIdx, 0))
+    setRecordIdx(Math.max(targetIdx, 0))
   }
 
   useEffect(() => {
@@ -764,13 +860,30 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
     let items: TimelineItemProps[] = []
     timelineItemRefs.current = []
     records.forEach((item, idx) => {
+      if (!item.show) return
+      let highlight
+      if (recordIdx === null || recordIdx > idx) {
+        highlight = false
+      }
+      else {
+        let no_hl = false
+        for (let prev_idx = recordIdx; prev_idx < idx; prev_idx++) {
+          if (records[prev_idx].show) {
+            no_hl = true
+            break
+          }
+        }
+        if (!no_hl) {
+          highlight = true
+        }
+      }
       if (typeof item.info === "string") {
         items.push({
           label: item.time.toFixed(2),
-          color: idx === viewIdx ? "red" : undefined,
+          color: highlight ? "red" : undefined,
           children: (
             <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
-              font-weight: ${idx === viewIdx ? "bold" : "normal"};
+              font-weight: ${highlight ? "bold" : "normal"};
             `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
             >
               {item.info}
@@ -780,26 +893,28 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
       }
       else {
         if (actionStatusMapper[item.info.action_type] === "wait") {
+          let total_wait_count = 1
+          while (!records[idx - total_wait_count].show) total_wait_count++
           items.push({
             label: item.time.toFixed(2),
             dot: <ClockCircleOutlined />,
-            color: idx === viewIdx ? "red" : undefined,
+            color: highlight ? "red" : undefined,
             children: (
               <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
-                font-weight: ${idx === viewIdx ? "bold" : "normal"};
+                font-weight: ${highlight ? "bold" : "normal"};
               `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
               >
-                wait
+                {total_wait_count === 1 ? "wait" : `wait (×${total_wait_count})`}
               </a>
             )
           })
         }
         else {
           items.push({
-            color: idx === viewIdx ? "red" : "gray",
+            color: highlight ? "red" : "gray",
             children: (
               <a ref={(el) => timelineItemRefs.current[idx] = el!} css={css`
-                font-weight: ${idx === viewIdx ? "bold" : "normal"};
+                font-weight: ${highlight ? "bold" : "normal"};
               `} onClick={(e) => { e.preventDefault(); jumpToRecord(idx) }}
               >
                 {
@@ -856,12 +971,14 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
       }
     })
     setTimelineItems(items)
-  }, [viewIdx])
+  }, [recordIdx])
 
   useLayoutEffect(() => {
-    if (viewIdx !== null) {
-      const lastRecord = timelineItemRefs.current[viewIdx]
-      lastRecord!.scrollIntoView({ behavior: "smooth", block: "center" })
+    if (recordIdx !== null) {
+      let showIdx = recordIdx
+      while (records[showIdx].show === false) showIdx++
+      const currentRecord = timelineItemRefs.current[showIdx]
+      currentRecord?.scrollIntoView({ behavior: "smooth", block: "center" })
     }
   }, [timelineItems])
 
@@ -915,7 +1032,12 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
               <InputNumber min={1} value={sampleCount} onChange={(v) => setSampleCount(v || 1)} />
               模拟步数：
               <InputNumber min={0} value={simCount} onChange={(v) => setSimCount(v || 0)} />
-              <Button type="primary" onClick={startPredict} disabled={selectedModelPath === null}>规划全部</Button>
+              {
+                abortController === null ?
+                  <Button type="primary" onClick={startPredict} disabled={selectedModelPath === null}>规划全部</Button>
+                :
+                <Button disabled={isModalOpen} type="primary" onClick={()=>setIsModalOpen(true)}>显示进度</Button>
+              }
               <Button css={css`
               margin-left: 10px;
             `} type="default" onClick={props.onReture}>返回</Button>
@@ -944,7 +1066,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                     `}>
                       <OperationViewer
                         timestamp={timestamp}
-                        state={viewIdx !== null ? records[viewIdx].state : props.state}
+                        state={recordIdx !== null ? records[recordIdx].state : props.state}
                         paths={paths}
                         css={css`
                           width: 100%;
@@ -958,13 +1080,13 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                       `}>
                         <Flex justify="center" gap={10}>
                           <Button shape="circle"
-                            onClick={() => jumpToRecord(viewIdx! - 1)}
-                            disabled={records.length === 0 || viewIdx === 0 || viewIdx === null}
+                            onClick={() => jumpToRecord(recordIdx! - 1)}
+                            disabled={records.length === 0 || recordIdx === 0 || recordIdx === null}
                             icon={<LeftOutlined />}
                           />
                           <Button shape="circle"
-                            onClick={() => jumpToRecord(viewIdx! + 1)}
-                            disabled={records.length === 0 || viewIdx === records.length - 1 || viewIdx === null}
+                            onClick={() => jumpToRecord(recordIdx! + 1)}
+                            disabled={records.length === 0 || recordIdx === records.length - 1 || recordIdx === null}
                             icon={<RightOutlined />}
                           />
                         </Flex>
@@ -982,7 +1104,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
                   <Splitter.Panel min="20%">
                     <MachineViewer
                       timestamp={timestamp}
-                      state={viewIdx !== null ? records[viewIdx].state : props.state}
+                      state={recordIdx !== null ? records[recordIdx].state : props.state}
                       paths={paths}
                       css={css`
                         width: 100%;
@@ -994,7 +1116,7 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
               </Splitter.Panel>
               <Splitter.Panel collapsible>
                 {
-                  viewIdx !== null ? (
+                  recordIdx !== null ? (
                     <Timeline mode="left" items={timelineItems} css={css`
                       margin: 15px;
                     `} />
@@ -1011,10 +1133,14 @@ const EnvViewer: BaseFC<{ state: EnvState, onReture: () => void }> = (props) => 
           </Card>
         </Layout.Content>
       </Layout>
-      <Modal open={isModalOpen} onCancel={() => abortController!.abort()} closable={false}
-        footer={(_, { CancelBtn }) => <CancelBtn />}
+      <Modal open={isModalOpen} onCancel={() => abortController?.abort()} maskClosable={false} closable={false}
+        footer={(_, { CancelBtn }) => [
+          <Button type="primary" onClick={() => setIsModalOpen(false)}>隐藏</Button>,
+          <CancelBtn />
+        ]}
       >
-        {progress}
+        steps: {progress[0]}
+        <Progress percent={progress[2] / progress[1] * 100} format={() => `${progress[2]} / ${progress[1]}`} />
       </Modal>
     </>
   )

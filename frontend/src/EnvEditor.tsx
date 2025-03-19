@@ -15,11 +15,12 @@ import {
 import {
   BaseFC, OperationState, EnvState, GenerationParams,
   AGVState, MachineState, AddOperationParams, AddAGVParams,
-  AddMachineParams
+  AddMachineParams,
+  OperationInfo
 } from "./types";
-import { 
-  addAGV, addMachine, addOperation, addPath, loadEnv, 
-  newEnv, randEnv, removeMachine, removeOperation, saveEnv 
+import {
+  addAGV, addMachine, addOperation, addPath, addRelation, loadEnv,
+  newEnv, randEnv, removeMachine, removeOperation, removeRelation, saveEnv
 } from "./backend-api";
 
 const OperationNode: BaseFC<{
@@ -785,24 +786,26 @@ const AGVNode: BaseFC<{ state: AGVState, onRemoveClick: () => void }> = (props) 
   )
 }
 
-const AddOperationConfigForm: BaseFC<{
-  formData: FormInstance<AddOperationParams>,
-  onFinish: () => void,
-  machines: MachineState[]
-}> = (props) => {
+const MachineTypeSelectItems = (machines: MachineState[]) => {
   const typeMap = new Map<number, number[]>()
-  props.machines.forEach((machine) => {
+  machines.forEach((machine) => {
     typeMap.set(machine.type, [...(typeMap.get(machine.type) || []), machine.id])
   })
 
-  const machineTypes = Array.from(typeMap.entries()).map(([type, machines]) => (
+  return Array.from(typeMap.entries()).map(([type, machines]) => (
     {
       label: `${type} (${machines})`,
       disabled: type === 0,
       value: type
     }
   ))
+}
 
+const AddOperationConfigForm: BaseFC<{
+  formData: FormInstance<AddOperationParams>,
+  onFinish: () => void,
+  machines: MachineState[]
+}> = (props) => {
   return (
     <Form className={props.className} form={props.formData} onFinish={props.onFinish}>
       <Flex justify="center" align="center" css={css`
@@ -854,7 +857,7 @@ const AddOperationConfigForm: BaseFC<{
         />
       </Flex>
       <Form.Item<AddOperationParams> name="machine_type" label="设备类型">
-        <Select options={machineTypes} />
+        <Select options={MachineTypeSelectItems(props.machines)} />
       </Form.Item>
       <Form.Item<AddOperationParams> name="process_time" label="处理时间">
         <InputNumber min={0} step={0.01} />
@@ -940,12 +943,53 @@ const AddAGVConfigForm: BaseFC<{
 
 
 const OperationInfoForm: BaseFC<{
-  formData: FormInstance<OperationState>,
+  formData: FormInstance<OperationInfo>,
+  state: EnvState,
   onFinish: () => void
 }> = (props) => {
   return (
     <Form className={props.className} form={props.formData} onFinish={props.onFinish}>
-      <div>{props.formData.getFieldValue("id")}</div>
+      <Form.Item<OperationInfo> name="id" label="编号">
+        <InputNumber disabled />
+      </Form.Item>
+      <Form.Item<OperationInfo> name="machine_type" label="设备类型">
+        <Select
+          options={MachineTypeSelectItems(props.state.machines)}
+          disabled={[0, 9999].includes(props.formData.getFieldValue("id") as number)}
+        />
+      </Form.Item>
+      <Form.Item<OperationInfo> name="process_time" label="处理时间">
+        <InputNumber min={0} step={0.01} />
+      </Form.Item>
+      <Form.Item<OperationInfo> name="predecessors" label="前驱工序">
+        <Select
+          mode="multiple"
+          options={
+            props.state.operations
+              .map((op) => ({
+                lebel: op.id,
+                disabled: op.id === 9999 || op.id === props.formData.getFieldValue("id"),
+                value: op.id
+              }))
+          }
+        />
+      </Form.Item>
+      <Form.Item<OperationInfo> name="successors" label="后继工序">
+        <Select
+          mode="multiple"
+          options={
+            props.state.operations
+              .map((op) => ({
+                lebel: op.id,
+                disabled: op.id === 0 || op.id === props.formData.getFieldValue("id"),
+                value: op.id
+              }))
+          }
+        />
+      </Form.Item>
+      <Form.Item>
+        <Button type="primary" htmlType="submit">确定</Button>
+      </Form.Item>
     </Form>
   )
 }
@@ -1073,9 +1117,10 @@ const EnvEditor: BaseFC<{
 
   const [selectedOperation, setSelectedOperation] = useState<number | null>(null)
   const [isOperationInfoModalOpen, setIsOperationInfoModalOpen] = useState(false)
-  const [operationInfoForm] = Form.useForm<OperationState>()
+  const [operationInfoForm] = Form.useForm<OperationInfo>()
   const handelOperationClick = async (id: number) => {
     if (selectedOperation === id) {
+      operationInfoForm.setFieldsValue(props.state!.operations.find((op) => op.id === id)!)
       setIsOperationInfoModalOpen(true)
     }
     else {
@@ -1087,6 +1132,34 @@ const EnvEditor: BaseFC<{
       setSelectedOperation(null)
     }
   }, [isOperationInfoModalOpen])
+  const manageOperationInfoUpdate = async () => {
+    const newInfo = operationInfoForm.getFieldsValue()
+    const oldState = props.state!.operations.find((op) => op.id === newInfo.id)!
+
+    oldState.machine_type = newInfo.machine_type
+    oldState.process_time = newInfo.process_time
+
+    let current_state = props.state!
+
+    for (const p of oldState.predecessors.filter((p) => !newInfo.predecessors.includes(p))) {
+      if (p === 0) continue
+      current_state = await removeRelation(current_state, p, oldState.id)
+    }
+    for (const p of newInfo.predecessors.filter((p) => !oldState.predecessors.includes(p))) {
+      if (p === 0) continue
+      current_state = await addRelation(current_state, p, oldState.id)
+    }
+    for (const s of oldState.successors.filter((s) => !newInfo.successors.includes(s))) {
+      if (s == 9999) continue
+      current_state = await removeRelation(current_state, oldState.id, s)
+    }
+    for (const s of newInfo.successors.filter((s) => !oldState.successors.includes(s))) {
+      if (s == 9999) continue
+      current_state = await addRelation(current_state, oldState.id, s)
+    }
+
+    props.setState(current_state)
+  }
 
   const [selectedMachine, setSelectedMachine] = useState<number | null>(null)
   const handelMachineClick = async (id: number) => {
@@ -1180,7 +1253,7 @@ const EnvEditor: BaseFC<{
               </Button>
               <Space.Compact>
                 <Button type="primary" onClick={() => setIsRandModalOpen(true)}>随机</Button>
-                <Button type="primary" icon={<RedoOutlined />}
+                <Button type="primary" icon={<RedoOutlined />} disabled={randParamsForm.getFieldValue("operation_count") === undefined}
                   onClick={async () => {
                     randEnv(randParamsForm.getFieldsValue()).then((res) => {
                       props.setState(res)
@@ -1361,8 +1434,9 @@ const EnvEditor: BaseFC<{
             <Modal title="工序详情" open={isOperationInfoModalOpen} footer={null}
               onCancel={() => setIsOperationInfoModalOpen(false)}
             >
-              <OperationInfoForm formData={operationInfoForm}
+              <OperationInfoForm formData={operationInfoForm} state={props.state}
                 onFinish={async () => {
+                  await manageOperationInfoUpdate()
                   setIsOperationInfoModalOpen(false)
                 }}
               />

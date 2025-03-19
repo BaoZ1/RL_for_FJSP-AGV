@@ -143,7 +143,5 @@ class PredictProgress(BaseModel):
     action: ActionState
 
 if __name__ == "__main__":
-    with open(r"private\test_1.json", "r") as f:
-        state = EnvState.model_validate_json(f.read())
-    import json
-    json.dumps(state.model_dump_json())  
+    g = Graph.rand_generate(GenerateParam(6,2,3,1,5,7,0.8,3,5,False))
+    EnvState.model_validate(g)

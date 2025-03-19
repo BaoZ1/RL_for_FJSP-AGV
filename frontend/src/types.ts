@@ -27,6 +27,8 @@ export type OperationState = {
   sent_succs: number[]
 }
 
+export type OperationInfo = Pick<OperationState, "id" | "machine_type" | "process_time" | "predecessors" | "successors">
+
 export const MachineStatusMapper = {
   0: "idle",
   1: "waiting_material",
@@ -43,7 +45,7 @@ export type MachineState = {
   pos: { x: number, y: number }
   status: MachineStatusIdx
   working_operation: number | null
-  waiting_operation: number | null
+  waiting_operations: number[]
   materials: { from: number, to: number }[]
   products: { from: number, to: number }[]
 }

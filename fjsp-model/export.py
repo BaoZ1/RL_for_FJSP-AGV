@@ -1,5 +1,5 @@
-from fjsp_model.modules import *
-from fjsp_model.utils import Metadata
+from modules import *
+from utils import Metadata
 from pathlib import Path
 from torch.export import Dim
 
@@ -66,6 +66,7 @@ def export_extractor(m: StateExtract, dir: str):
         input_names=input_names,
         output_names=output_names,
         dynamo=True,
+        external_data=False,
     )
 
 
@@ -118,6 +119,7 @@ def export_encoder(m: ActionEncoder, dir: str):
         input_names=input_names,
         output_names=output_names,
         dynamo=True,
+        external_data=False,
     )
 
 
@@ -142,6 +144,7 @@ def export_value(m: ValueNet, dir: str):
         input_names=input_names,
         output_names=output_names,
         dynamo=True,
+        external_data=False,
     )
 
 
@@ -170,4 +173,11 @@ def export_policy(m: PolicyNet, dir: str):
         input_names=input_names,
         output_names=output_names,
         dynamo=True,
+        external_data=False,
     )
+
+def export(m: Model, dir: str):
+    export_extractor(m.extractor, dir)
+    export_encoder(m.action_encoder, dir)
+    export_value(m.value_net, dir)
+    export_policy(m.policy_net, dir)

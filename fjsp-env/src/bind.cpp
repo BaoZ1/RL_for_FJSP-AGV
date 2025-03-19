@@ -81,6 +81,8 @@ PYBIND11_MODULE(_core, m)
         .def("get_operations_id", &Graph::get_operations_id)
         .def("get_machines_id", &Graph::get_machines_id)
         .def("get_AGVs_id", &Graph::get_AGVs_id)
+        .def("add_relation", &Graph::add_relation, "from"_a, "to"_a)
+        .def("remove_relation", &Graph::remove_relation, "from"_a, "to"_a)
         .def(
             "insert_operation", &Graph::insert_operation,
             "machine_type"_a, "process_time"_a, "predecessors"_a = nullopt, "successors"_a = nullopt

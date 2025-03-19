@@ -119,6 +119,42 @@ export const removeOperation = async (state: EnvState, target: number) => {
   return ret as EnvState
 }
 
+export const addRelation = async (state: EnvState, a: number, b: number) => {
+  const url = new URL("relation/add", BASE_PATH)
+  url.searchParams.append("a", a.toString())
+  url.searchParams.append("b", b.toString())
+  const response = await fetch(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    }
+  )
+  await handleError(response)
+  const ret = await response.json()
+  console.log(ret);
+  return ret as EnvState
+}
+
+export const removeRelation = async (state: EnvState, a: number, b: number) => {
+  const url = new URL("relation/remove", BASE_PATH)
+  url.searchParams.append("a", a.toString())
+  url.searchParams.append("b", b.toString())
+  const response = await fetch(
+    url,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state)
+    }
+  )
+  await handleError(response)
+  const ret = await response.json()
+  console.log(ret);
+  return ret as EnvState
+}
+
 export const addMachine = async (state: EnvState, params: AddMachineParams) => {
   const url = new URL("machine/add", BASE_PATH)
   url.searchParams.append("type", params.type.toString())
