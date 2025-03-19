@@ -187,10 +187,10 @@ py::dict Graph::get_state() const
             "process_time"_a = operation->process_time,
             "processing_machine"_a = operation->processing_machine,
             "finish_timestamp"_a = operation->finish_timestamp,
-            "predecessors"_a = vector<OperationId>(from_range, operation->predecessors),
-            "arrived_preds"_a = vector<OperationId>(from_range, operation->arrived_preds),
-            "successors"_a = vector<OperationId>(from_range, operation->successors),
-            "sent_succs"_a = vector<OperationId>(from_range, operation->sent_succs)
+            "predecessors"_a = ranges::to<vector<OperationId>>(operation->predecessors),
+            "arrived_preds"_a = ranges::to<vector<OperationId>>(operation->arrived_preds),
+            "successors"_a = ranges::to<vector<OperationId>>(operation->successors),
+            "sent_succs"_a = ranges::to<vector<OperationId>>(operation->sent_succs)
         );
     }
     vector<py::dict> machine_dict;
@@ -273,10 +273,10 @@ shared_ptr<Graph> Graph::from_state(py::dict d)
         new_operation->status = static_cast<OperationStatus>(operation_dict["status"].cast<int>());
         new_operation->processing_machine = operation_dict["processing_machine"].cast<optional<MachineId>>();
         new_operation->finish_timestamp = operation_dict["finish_timestamp"].cast<float>();
-        new_operation->predecessors = set(from_range, operation_dict["predecessors"].cast<vector<OperationId>>());
-        new_operation->arrived_preds = set(from_range, operation_dict["arrived_preds"].cast<vector<OperationId>>());
-        new_operation->successors = set(from_range, operation_dict["successors"].cast<vector<OperationId>>());
-        new_operation->sent_succs = set(from_range, operation_dict["sent_succs"].cast<vector<OperationId>>());
+        new_operation->predecessors = ranges::to<set<OperationId>>(operation_dict["predecessors"].cast<vector<OperationId>>());
+        new_operation->arrived_preds = ranges::to<set<OperationId>>(operation_dict["arrived_preds"].cast<vector<OperationId>>());
+        new_operation->successors = ranges::to<set<OperationId>>(operation_dict["successors"].cast<vector<OperationId>>());
+        new_operation->sent_succs = ranges::to<set<OperationId>>(operation_dict["sent_succs"].cast<vector<OperationId>>());
         res->operations[new_operation->id] = new_operation;
         if (new_operation->status == OperationStatus::processing)
         {
@@ -699,8 +699,8 @@ void Graph::calc_distance()
                 if (dist > total_dist)
                 {
                     path.clear();
-                    path.append_range(first_path);
-                    path.append_range(second_path);
+                    ranges::copy(first_path, back_inserter(path));
+                    ranges::copy(second_path, back_inserter(path));
                     dist = total_dist;
                 }
             }
