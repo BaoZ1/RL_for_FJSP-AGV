@@ -1603,8 +1603,8 @@ class Agent(L.LightningModule):
             if self.stage == Agent.TrainStage.explore:
                 acts, act_idxs = self.model.single_step_predict(
                     [g.copy() for g in self.envs.envs],
-                    self.root_sample_count,
-                    self.simulation_count,
+                    1,
+                    0,
                 )
             else:
                 acts = []

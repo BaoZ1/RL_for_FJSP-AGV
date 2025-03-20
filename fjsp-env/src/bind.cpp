@@ -4,6 +4,15 @@
 
 #include "FJSP_env.h"
 
+const OperationId Graph::begin_operation_id, Graph::end_operation_id;
+const MachineId Graph::dummy_machine_id;
+const MachineType Graph::dummy_machine_type;
+
+const size_t Graph::global_feature_size;
+const size_t Graph::operation_feature_size;
+const size_t Graph::machine_feature_size;
+const size_t Graph::AGV_feature_size;
+
 namespace py = pybind11;
 using namespace py::literals;
 

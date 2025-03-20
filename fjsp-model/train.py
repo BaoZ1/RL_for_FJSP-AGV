@@ -111,7 +111,7 @@ model = Agent(
     5,
     Agent.TrainStage.explore,
 )
-
+torch.cuda.is_available
 model.load(
     r"lightning_logs\version_5\checkpoints\epoch=59-step=600.ckpt",
     Agent.TrainStage.policy,
