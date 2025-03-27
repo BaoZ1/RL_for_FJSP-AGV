@@ -4,6 +4,25 @@
 
 #include "FJSP_env.h"
 
+template <>
+struct hash<Action>
+{
+    size_t operator()(const Action &a)
+    {
+        switch (a.type)
+        {
+        case ActionType::wait:
+            return 0;
+        case ActionType::move:
+            return a.act_AGV.value() * 1e0 + a.target_machine.value() * 1e2;
+        case ActionType::pick:
+            return a.act_AGV.value() * 1e0 + a.target_machine.value() * 1e2 + a.target_product.value().from * 1e4 + a.target_product.value().to * 1e6;
+        case ActionType::transport:
+            return a.act_AGV.value() * 1e0 + a.target_machine.value() * 1e2 + 1e8;
+        }
+    }
+};
+
 const OperationId Graph::begin_operation_id, Graph::end_operation_id;
 const MachineId Graph::dummy_machine_id;
 const MachineType Graph::dummy_machine_type;
@@ -69,6 +88,7 @@ PYBIND11_MODULE(_core, m)
             "action_type"_a, "AGV_id"_a, "target_machine"_a, "target_product"_a
         )
         .def(py::self == py::self)
+        .def(py::hash(py::self))
         .def_readwrite("action_type", &Action::type)
         .def_readwrite("AGV_id", &Action::act_AGV)
         .def_readwrite("target_machine", &Action::target_machine)

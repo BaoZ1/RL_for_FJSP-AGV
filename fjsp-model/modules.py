@@ -825,49 +825,141 @@ class PredictNet(nn.Module):
         return self.model(torch.cat([state, action], -1))
 
     __call__: Callable[[Tensor, Tensor], Tensor]
-
-
+        
+        
 class Node:
     def __init__(self, parent: Self | None, index: int, logit: float):
-        self.parent = parent
-        self.index = index
-        self.logit = logit
+        self.parents = [parent] if parent else []
+        self.index: dict[int, int] = {0: index}
+        self.logit: dict[int, float] = {0: logit}
+        self.reward: dict[int, float] = {}
         self.children: list[Node] = []
         self.value_list: list[float] = []
-        self.visit_count = 0
+        self.finished = False
         self.depth = 0 if parent is None else parent.depth + 1
+    
+    @property
+    def visit_count(self):
+        return len(self.value_list)
+        
+    def find_equivalent_node(self, idx: int) -> None | Self:
+        if isinstance(self, RootNode):
+            return None
+        if self.actions[idx].action_type == ActionType.wait:
+            return None
+
+        search_tasks: list[tuple[Node, tuple[Node], tuple[Action]]] = [
+            (p, (self,), (p.actions[self.index[pidx]], self.actions[idx])) 
+            for pidx, p in enumerate(self.parents)
+        ]
+        next_round_search = []
+        while len(search_tasks):
+            for search_root, origin_path, target_action_list in search_tasks:
+                target_action_series = set(target_action_list)
+                action_index_stack: list[tuple[int]] = [()]
+                while len(action_index_stack):
+                    action_idxs = action_index_stack.pop()
+                    if len(action_idxs) == len(target_action_series):
+                        action_series = set()
+                        node = search_root
+                        for idx in action_idxs:
+                            action_series.add(node.actions[idx])
+                            node = node.children[idx]
+                        if action_series == target_action_series:
+                            return node
+                    elif len(action_idxs) < len(target_action_series):
+                        node = search_root
+                        for idx in action_idxs:
+                            node = node.children[idx]
+                        if node == self:
+                            print("????!!!!", action_idxs)
+                        if node.expanded():
+                            for new_idx in range(len(node.actions)):
+                                if (
+                                    len(action_idxs) < len(target_action_series) - 1 
+                                    and node.children[new_idx] == origin_path[len(action_idxs)]
+                                ):
+                                    continue
+                                if node.actions[new_idx].action_type == ActionType.wait:
+                                    continue
+                                action_index_stack.append((*action_idxs, new_idx))
+
+                for pidx, p in enumerate(search_root.parents):
+                    i = search_root.index[pidx]
+                    new_action = p.actions[i]
+                    if new_action.action_type != ActionType.wait:
+                        next_round_search.append((p, (search_root, *origin_path), (new_action, *target_action_list)))
+            search_tasks = next_round_search
+            next_round_search = []
+        return None
+    
+    def spread_value(self, value: float):
+        self.value_list.append(value)
+        for p in self.parents:
+            if (r := self.reward.get(self.parents.index(p), None)) is not None:
+                p.spread_value(value + r) # ? 可能有问题，会给带分叉合并的祖宗节点添加多个value
+                
+    def check_finish(self):
+        if self.graph.finished():
+            self.finished = True
+        elif self.expanded() and all([c.expanded(self) and c.finished for c in self.children]):
+            self.finished = True
+        
+        if self.finished:
+            for p in self.parents:
+                p.check_finish()
+                
+    def add_parent(self, parent: Self, index: int, logit: float):
+        self.parents.append(parent)
+        self.index[self.parents.index(parent)] = index
+        self.logit[self.parents.index(parent)] = logit
 
     def expand(
         self,
+        parent: Self | None,
         graph: Graph,
         actions: list[Action],
         reward: float,
         logits: Tensor,
+        value: float | None,
     ):
+        if parent is not None:
+            self.reward[self.parents.index(parent)] = reward
+            if self.finished:
+                parent.check_finish()
+            
+        if len(self.value_list) > 0:
+            for v in self.value_list:
+                parent.spread_value(v + reward)
+            return
+        
         self.graph = graph.copy()
         self.actions = actions
-        self.reward = reward
+        
         for i in range(len(actions)):
-            self.children.append(Node(self, i, logits[i].item()))
-
-        self.finished = self.graph.finished()
-        p = self
-        while (p := p.parent) is not None:
-            children_to_check = (
-                [p.children[i] for i in p.remain_actions_idx]
-                if isinstance(p, RootNode)
-                else p.children
-            )
-            if all([c.expanded() and c.finished for c in children_to_check]):
-                p.finished = True
+            if (existed_node := self.find_equivalent_node(i)) is not None:
+                self.children.append(existed_node)
+                existed_node.add_parent(self, i, logits[i].item())
             else:
-                break
+                self.children.append(Node(self, i, logits[i].item()))
+
+        if value is not None:
+            self.spread_value(value)
+            
+        self.check_finish()
+        
 
     def logits(self):
-        return [child.logit for child in self.children]
+        ret = []
+        for child in self.children:
+            ret.append(child.logit[child.parents.index(self)])
+        return ret
 
-    def expanded(self):
-        return len(self.children) > 0
+    def expanded(self, parent: Self | None = None):
+        if parent is not None:
+            return self.reward.get(self.parents.index(parent), None) is not None
+        else:
+            return len(self.children) > 0
 
     def value(self):
         return np.mean(self.value_list)
@@ -878,11 +970,11 @@ class Node:
         sum_visit = 0
         probs: list[float] = F.softmax(tensor(self.logits()), 0).tolist()
         for child in self.children:
-            if child.expanded():
-                sum_p_q += probs[child.index] * (
-                    child.reward + 1.0 * child.value()
+            if child.expanded(self):
+                sum_p_q += probs[child.index[child.parents.index(self)]] * (
+                    child.reward[child.parents.index(self)] + 1.0 * child.value()
                 )
-                sum_prob += probs[child.index]
+                sum_prob += probs[child.index[child.parents.index(self)]]
                 sum_visit += child.visit_count
         if sum_prob < 1e-6:
             v_mix = self.value()
@@ -893,8 +985,8 @@ class Node:
 
         completed_Qs = [
             (
-                (child.reward + 1.0 * child.value())
-                if child.expanded()
+                (child.reward[child.parents.index(self)] + 1.0 * child.value())
+                if child.expanded(self)
                 else v_mix
             )
             for child in self.children
@@ -924,7 +1016,7 @@ class Node:
         child_visit_counts = tensor([child.visit_count for child in self.children])
         finished_adj = tensor(
             [
-                -torch.inf if child.expanded() and child.finished else 0
+                -torch.inf if child.expanded(self) and child.finished else 0
                 for child in self.children
             ]
         )
@@ -939,19 +1031,41 @@ class Node:
 class RootNode(Node):
     def __init__(self):
         super().__init__(None, -1, 1)
+        
+        
+    def expand(
+        self,
+        graph: Graph,
+        actions: list[Action],
+        reward: float,
+        logits: Tensor,
+        value: float | None,
+    ):
+        self.remain_actions_idx = list(range(len(actions)))
+        super().expand(None, graph, actions, reward, logits, value)
+        
+    def expanded(self):
+        return len(self.children) > 0
 
     def set_remain_actions_idx(self, idx: list[int]):
         self.remain_actions_idx = idx
-        if all(
-            [self.children[i].expanded() and self.children[i].finished for i in idx]
-        ):
+        self.check_finish()
+            
+    def check_finish(self):
+        if self.graph.finished():
+            self.finished = True
+        elif self.expanded() and all([
+            c.expanded(self) and c.finished 
+            for i, c in enumerate(self.children) 
+            if i in self.remain_actions_idx
+        ]):
             self.finished = True
 
     def select_action(self):
         min_visit_count = self.visit_count + 1
         min_visit_idx = -1
         for idx in self.remain_actions_idx:
-            if not self.children[idx].expanded():
+            if not self.children[idx].expanded(self):
                 return self.children[idx]
             if (
                 c := self.children[idx].visit_count < min_visit_count
@@ -1029,13 +1143,12 @@ class MCTS:
             ),
         ):
             new_root = RootNode()
-            new_root.visit_count += 1
-            new_root.value_list.append(value.item())
             new_root.expand(
                 graph,
                 actions,
                 0,
                 self.policy_net(state, actions_emb),
+                value.item(),
             )
             roots.append(new_root)
         gs: list[Tensor] = []
@@ -1060,6 +1173,7 @@ class MCTS:
             target_leaves: list[Node] = []
             target_actions = []
             parent_graphs = []
+            parents: list[Node] = []
             sim_state_idx: list[int] = []
             for i, (root, actions_index, counts, stage) in enumerate(
                 zip(roots, remaining_actions_index, sim_SH_idxs, sim_stages)
@@ -1073,11 +1187,14 @@ class MCTS:
                     continue
 
                 node = root.select_action()
-                while node.expanded():
+                parent = root
+                while node.expanded(parent):
+                    parent = node
                     node = node.select_action()
                 target_leaves.append(node)
-                target_actions.append(node.parent.actions[node.index])
-                parent_graphs.append(node.parent.graph)
+                target_actions.append(parent.actions[node.index[node.parents.index(parent)]])
+                parent_graphs.append(parent.graph)
+                parents.append(parent)
 
             if len(sim_state_idx) == 0:
                 break
@@ -1105,7 +1222,9 @@ class MCTS:
                     [o.mapper for o in obs],
                 )
 
-                for node, (
+                for (
+                    node, 
+                    parent,(
                     (
                         graph,
                         states,
@@ -1114,8 +1233,9 @@ class MCTS:
                         reward,
                     ),
                     value,
-                ) in zip(
+                )) in zip(
                     target_leaves,
+                    parents,
                     zip(
                         zip(
                             env.envs,
@@ -1128,19 +1248,13 @@ class MCTS:
                     ),
                 ):
                     node.expand(
+                        parent,
                         graph,
                         actions,
                         reward,
                         self.policy_net(states, actions_emb),
+                        value.item(),
                     )
-                    while True:
-                        node.visit_count += 1
-                        node.value_list.append(value.item())
-                        if (p := node.parent) is not None:
-                            value = node.reward + 1.0 * value
-                            node = p
-                        else:
-                            break
 
             for idx in sim_state_idx:
                 if sim_SH_idxs[idx][sim_stages[idx]] == sim_idx:

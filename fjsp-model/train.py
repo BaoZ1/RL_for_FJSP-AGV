@@ -87,7 +87,7 @@ train_env = Environment(
 
 model = Agent(
     train_env,
-    1e-6,
+    1e-5,
     8,
     5,
     270,
@@ -109,12 +109,12 @@ model = Agent(
     4,
     32,
     5,
-    Agent.TrainStage.explore,
+    Agent.TrainStage.policy,
 )
 torch.cuda.is_available
 model.load(
-    r"lightning_logs\version_5\checkpoints\epoch=59-step=600.ckpt",
-    Agent.TrainStage.policy,
+    r"lightning_logs\version_3\checkpoints\epoch=59-step=600.ckpt",
+    Agent.TrainStage.encode,
 )
 
 
@@ -125,7 +125,7 @@ trainer = Trainer(
     # accelerator="cpu",
     callbacks=[TQDMProgressBar(leave=True)],
     log_every_n_steps=1,
-    check_val_every_n_epoch=15,
+    check_val_every_n_epoch=12,
     num_sanity_val_steps=0,
     max_epochs=-1,
 )
