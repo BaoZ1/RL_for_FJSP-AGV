@@ -15,11 +15,9 @@ try {
     if ($updateBackend) {
         Set-Location "$($root)/backend"
 
-        .venv/Scripts/activate.ps1
+        uv sync
         
-        cxfreeze build
-
-        deactivate
+        uv run cxfreeze build
         
         $prefix = rustc -Vv | Select-String "host:" | ForEach-Object { $_.Line.split(" ")[1] }
 
