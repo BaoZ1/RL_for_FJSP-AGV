@@ -95,7 +95,7 @@ model = Agent(
     24,
     (64, 48, 48),
     (256, 192, 192),
-    384,
+    512,
     5,
     128,
     (256, 192, 192),
@@ -109,12 +109,12 @@ model = Agent(
     4,
     32,
     5,
-    Agent.TrainStage.policy,
+    Agent.TrainStage.explore,
 )
-torch.cuda.is_available
+
 model.load(
-    r"lightning_logs\version_3\checkpoints\epoch=59-step=600.ckpt",
-    Agent.TrainStage.encode,
+    r"lightning_logs\version_3\checkpoints\policy-on-v2-epoch=47-step=480.ckpt",
+    Agent.TrainStage.policy,
 )
 
 
@@ -122,8 +122,9 @@ model.compile_modules()
 torch.set_float32_matmul_precision("medium")
 
 trainer = Trainer(
+    
     # accelerator="cpu",
-    callbacks=[TQDMProgressBar(leave=True)],
+    callbacks=[TQDMProgressBar(leave=True), ModelCheckpoint(filename='explore-on-v3-{epoch}-{step}')],
     log_every_n_steps=1,
     check_val_every_n_epoch=12,
     num_sanity_val_steps=0,
@@ -131,5 +132,5 @@ trainer = Trainer(
 )
 trainer.fit(
     model,
-    # ckpt_path=r"lightning_logs\version_1\checkpoints\epoch=14-step=150.ckpt",
+    # ckpt_path=r"lightning_logs\version_0\checkpoints\encode.ckpt",
 )

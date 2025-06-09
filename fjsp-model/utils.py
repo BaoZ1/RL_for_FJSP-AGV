@@ -221,6 +221,7 @@ def single_step_useful_only_predict(obs: Observation, rand_prob: float = 0):
     return act, act_idx
 
 
+
 async def simple_predict(
     graph: Graph, rule: Callable[[Observation], tuple[Action, int]]
 ):

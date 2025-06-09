@@ -1425,7 +1425,6 @@ class Agent(L.LightningModule):
     
     class TrainStage(IntEnum):
         encode = auto()
-        _value = auto()
         policy = auto()
         explore = auto()
 
@@ -1536,10 +1535,8 @@ class Agent(L.LightningModule):
                 ]
             )
 
-        if stage >= Agent.TrainStage._value:
-            load_modules.extend(["value_net"])
-
         if stage >= Agent.TrainStage.policy:
+            load_modules.extend(["value_net"])
             load_modules.extend(["policy_net"])
 
         for module_name in load_modules:
@@ -1568,8 +1565,6 @@ class Agent(L.LightningModule):
 
     def get_baseline(self) -> tuple[np.ndarray | None, list[Graph]]:
         if self.stage == Agent.TrainStage.encode:
-            return None, [None]
-        if self.stage == Agent.TrainStage._value:
             return None, [None]
         if self.stage >= Agent.TrainStage.policy:
             temp_envs = [
@@ -1703,8 +1698,6 @@ class Agent(L.LightningModule):
 
     def on_train_start(self):
         match self.stage:
-            case Agent.TrainStage._value:
-                self.value_target.load_state_dict(self.model.value_net.state_dict())
             case Agent.TrainStage.policy | Agent.TrainStage.explore:
                 self.value_target.load_state_dict(self.model.value_net.state_dict())
                 self.policy_target.load_state_dict(self.model.policy_net.state_dict())
@@ -1955,55 +1948,82 @@ class Agent(L.LightningModule):
             }
         )
 
-    def value_stage(self, items: list[SequenceReplayItem], opt: LightningOptimizer):
+    def actor_critic_stage(
+        self,
+        items: list[SequenceReplayItem],
+        opt: LightningOptimizer,
+    ):
         self.eval()
         with torch.no_grad():
             obs = [[Observation.from_env(g) for g in item.graphs] for item in items]
             graphs = [build_graph(o.feature) for o in chain(*obs)]
             batched_graph = Batch.from_data_list(graphs).to(self.device)
-            graph_states = rearrange(
-                self.model.extractor.train_forward(batched_graph)[2],
-                "(n l) s -> n l s",
-                l=self.seq_len,
-            )
 
-            last_obs = [Observation.from_env(item.next_graphs[-1]) for item in items]
-            last_graphs = [build_graph(o.feature) for o in last_obs]
-            batched_last_graph = Batch.from_data_list(last_graphs).to(self.device)
-            last_graph_states = self.model.extractor.train_forward(batched_last_graph)[
-                2
+            next_obs = [
+                [Observation.from_env(g) for g in item.next_graphs] for item in items
             ]
-
-            dones = tensor(
-                [item.dones[-1] for item in items],
-                dtype=torch.float,
-                device=self.device,
+            next_graphs = [build_graph(o.feature) for o in chain(*next_obs)]
+            batched_next_graph = Batch.from_data_list(next_graphs).to(self.device)
+            
+            (
+                node_states,
+                _,
+                graph_states,
+            ) = self.model.extractor.train_forward(batched_graph)
+            
+            next_graph_states = self.model.extractor.train_forward(batched_next_graph)[2]
+            
+            offsets = get_offsets(batched_graph)
+            mappers = sum(
+                [[o.mapper for o in os] for os in obs],
+                [],
             )
-            target_value = self.value_target(last_graph_states) * dones
-            for i in reversed(range(self.seq_len)):
-                target_value += tensor(
-                    [item.rewards[i] for item in items], device=self.device
-                )
-        self.train()
+            actions = sum(
+                [[o.action_list for o in os] for os in obs],
+                [],
+            )
 
-        pred_value = self.model.value_net(graph_states[:, 0])
-        value_loss = F.mse_loss(pred_value, target_value)
+            actions_embs = self.model.action_encoder.train_forward(
+                actions,
+                node_states,
+                offsets,
+                mappers,
+            )
+            
+            act_idxs = sum([item.action_idxs for item in items], [])
+            rewards = tensor(sum([item.rewards for item in items], []), device=self.device)
+            dones = tensor(sum([item.dones for item in items], []), dtype=torch.float, device=self.device)
+        
+            td_target = rewards + self.model.value_net(next_graph_states) * (1 - dones)
+            td_delta = td_target - self.model.value_net(graph_states)
+            
+        self.train()
+        
+        log_probs = []
+        for state, embs, idx in zip(graph_states, actions_embs, act_idxs):
+            logits = self.model.policy_net(state, embs)
+            log_probs.append(logits.log_softmax(-1)[idx])
+        log_probs = tensor(log_probs, device=self.device)
+        
+        actor_loss = torch.mean(-log_probs * td_delta)
+        critic_loss = torch.mean(
+            F.mse_loss(self.model.value_net(graph_states), td_target))
+        
         self.log_dict(
             {
-                "loss/value": value_loss,
+                "loss/actor": actor_loss,
+                "loss/critic": critic_loss,
             }
         )
+        
         opt.zero_grad()
-        self.manual_backward(value_loss / value_loss.detach().abs())
+        self.manual_backward(
+            critic_loss / critic_loss.detach().abs()
+            + actor_loss / actor_loss.detach().abs()
+        )
         self.value_net_norm_clipper.clip()
         self.policy_net_norm_clipper.clip()
         opt.step()
-
-        eps = 0.005
-        for t, n in zip(
-            self.value_target.parameters(), self.model.value_net.parameters()
-        ):
-            t.data.copy_(t.data * (1 - eps) + n.data * eps)
 
     def policy_stage(
         self,
@@ -2213,17 +2233,16 @@ class Agent(L.LightningModule):
             case Agent.TrainStage.encode:
                 self.encode_stage(items, encode_stage_opt)
                 # encode_stage_sch.step()
-            case Agent.TrainStage._value:
-                self.value_stage(items, value_opt)
             case Agent.TrainStage.policy:
                 # self.policy_stage(items, policy_opt)
                 # value_stage_sch.step()
                 # policy_sch.step()
                 self.explore_stage(items, explore_opt)
+                # self.actor_critic_stage(items, explore_opt)
                 explore_sch.step()
             case Agent.TrainStage.explore:
                 self.explore_stage(items, explore_opt)
-                # explore_sch.step()
+                explore_sch.step()
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.eval()
@@ -2234,7 +2253,10 @@ class Agent(L.LightningModule):
         match self.stage:
             case Agent.TrainStage.policy | Agent.TrainStage.explore:
                 bar: tqdm = self.trainer.progress_bar_callback.val_progress_bar
-                for sample_count, sim_count in [(1, 0), (2, 8), (4, 32)]:
+                search_scales = [(1, 0)]
+                if self.stage == Agent.TrainStage.explore:
+                    search_scales.extend([(2, 8), (4, 32)])
+                for sample_count, sim_count in search_scales:
                     bar.set_description(f"Validation [{sample_count}/{sim_count}]")
                     env = Environment.from_graphs(
                         [

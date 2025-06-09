@@ -158,13 +158,13 @@ version = "0.1.0"
 source = { directory = "../embed" }
 dependencies = [
     { name = "fjsp-env" },
-    { name = "onnxruntime-gpu" },
+    { name = "onnxruntime-directml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fjsp-env", directory = "../fjsp-env" },
-    { name = "onnxruntime-gpu", specifier = ">=1.21.0" },
+    { name = "onnxruntime-directml", specifier = ">=1.22.0" },
 ]
 
 [[package]]
@@ -310,8 +310,8 @@ wheels = [
 ]
 
 [[package]]
-name = "onnxruntime-gpu"
-version = "1.21.0"
+name = "onnxruntime-directml"
+version = "1.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "coloredlogs" },
@@ -322,11 +322,8 @@ dependencies = [
     { name = "sympy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ca/c1/4e469d129ad950fa9f2580347552128a72b2263443f365e3b5a036069afa/onnxruntime_gpu-1.21.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3008c9bcd89060db5e9a9985eb940e456c41bb36493ac171c794b587ea4585ed", size = 280811594 },
-    { url = "https://files.pythonhosted.org/packages/39/fe/095e36b84acd7573de180cece6e5b45fc7403a8f4a015501fbc249769957/onnxruntime_gpu-1.21.0-cp312-cp312-win_amd64.whl", hash = "sha256:cfa269be3f5b321d5923a2d3eca3487efdd30dfce95122fe25fea879009f35ea", size = 213081231 },
-    { url = "https://files.pythonhosted.org/packages/d8/c2/3d4807b3555f80501ee126e4fad40f9a47a9d3882b0369e2d624e9d19df8/onnxruntime_gpu-1.21.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:379f473c767e3cbaa1ee8563de29060cbf813ffc79967e932c2ae5780394bbb7", size = 280810186 },
-    { url = "https://files.pythonhosted.org/packages/f2/49/465afd3264e4707900851f53412c5cebe964c7a4d3a04fe6836af4fc6604/onnxruntime_gpu-1.21.0-cp313-cp313-win_amd64.whl", hash = "sha256:e6e5d9dc78b8e16bc631e675af6b094449b7adf4ec41bb2aeaa69b25a6d8f181", size = 213081727 },
-    { url = "https://files.pythonhosted.org/packages/12/f2/4549463ba3b756041a492b9f9959a4a88c302246fd12d0601a01079d76b8/onnxruntime_gpu-1.21.0-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5fb033a0647534590fc57219b59a12917c47bbdd79c41854a1549f3125306aea", size = 280804460 },
+    { url = "https://files.pythonhosted.org/packages/0a/64/6d942153e202ac0033629f64c7aa8a647b8401f3cb9114cdc44004bed331/onnxruntime_directml-1.22.0-cp312-cp312-win_amd64.whl", hash = "sha256:f8fc1a48b7fb134e34f8f138719a27d1bf6895611728b593fd86bc7c05b848a1", size = 24435369 },
+    { url = "https://files.pythonhosted.org/packages/c5/98/373529d796b7ff02f1c1536c6e182460a0d0a1c4979a438434f95d63f8ee/onnxruntime_directml-1.22.0-cp313-cp313-win_amd64.whl", hash = "sha256:35cde5043450cab642ac71a1ec7bded58e5ed5dcc867930a179cc48a501af235", size = 24435256 },
 ]
 
 [[package]]

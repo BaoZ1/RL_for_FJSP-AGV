@@ -145,21 +145,23 @@ class RootNode(Node):
 
 class Agent:
     def __init__(self, dir: Path):
+        providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+        
         self.state_model = onnxruntime.InferenceSession(
             dir / "state.onnx",
-            providers=["CUDAExecutionProvider"],
+            providers=providers,
         )
         self.action_model = onnxruntime.InferenceSession(
             dir / "action.onnx",
-            providers=["CUDAExecutionProvider"],
+            providers=providers,
         )
         self.value_model = onnxruntime.InferenceSession(
             dir / "value.onnx",
-            providers=["CUDAExecutionProvider"],
+            providers=providers,
         )
         self.policy_model = onnxruntime.InferenceSession(
             dir / "policy.onnx",
-            providers=["CUDAExecutionProvider"],
+            providers=providers,
         )
 
     @staticmethod

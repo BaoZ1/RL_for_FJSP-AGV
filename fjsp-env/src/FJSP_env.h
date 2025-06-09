@@ -110,7 +110,7 @@ public:
     static const size_t global_feature_size = 3;
     static const size_t operation_feature_size = 11;
     static const size_t machine_feature_size = 7;
-    static const size_t AGV_feature_size = 5;
+    static const size_t AGV_feature_size = 6;
 
     Graph();
 

@@ -751,12 +751,13 @@ shared_ptr<Graph> Graph::rand_generate(GenerateParam param)
     uniform_int_distribution<MachineType> machine_type_dist(min_machine_type, max_machine_type);
     uniform_int_distribution<int> machine_pos_x_base_dist(-8, 8);
     uniform_real_distribution<float> machine_pos_x_offset_dist(-3, 3);
-    auto machine_pos_x_dist = [&machine_pos_x_base_dist, &machine_pos_x_offset_dist](auto& eg){
+    auto machine_pos_x_dist = [&machine_pos_x_base_dist, &machine_pos_x_offset_dist](auto &eg)
+    {
         return machine_pos_x_base_dist(eg) * 5 + machine_pos_x_offset_dist(eg);
     };
     uniform_int_distribution<int> machine_pos_y_base_dist(-8, 8);
     uniform_real_distribution<float> machine_pos_y_offset_dist(-3, 3);
-    auto machine_pos_y_dist = [&machine_pos_y_base_dist, &machine_pos_y_offset_dist](auto& eg)
+    auto machine_pos_y_dist = [&machine_pos_y_base_dist, &machine_pos_y_offset_dist](auto &eg)
     {
         return machine_pos_y_base_dist(eg) * 5 + machine_pos_y_offset_dist(eg);
     };
@@ -1019,9 +1020,11 @@ RepeatedTuple<float, Graph::AGV_feature_size> Graph::get_AGV_feature(shared_ptr<
     float status_is_picking = AGV->status == AGVStatus::picking;
     float status_is_transporting = AGV->status == AGVStatus::transporting;
 
+    float speed = AGV->speed;
+
     float rest_act_time = AGV->status == AGVStatus::idle ? 0 : AGV->finish_timestamp - this->timestamp;
 
-    return {status_is_idle, status_is_moving, status_is_picking, status_is_transporting, rest_act_time};
+    return {status_is_idle, status_is_moving, status_is_picking, status_is_transporting, speed, rest_act_time};
 }
 
 tuple<shared_ptr<GraphFeature>, shared_ptr<IdIdxMapper>> Graph::features() const
